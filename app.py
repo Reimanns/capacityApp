@@ -8,7 +8,7 @@ import streamlit.components.v1 as components
 import pandas as pd
 
 import os
-import data_store as ds
+import gsheets_store as ds
 
 
 
@@ -53,8 +53,12 @@ DEFAULT_DEPTS = [
     {"name":"Upholstery","headcount":7,"key":"Upholstery"},
     {"name":"Finish","headcount":6,"key":"Finish"},
 ]
-# ---- Persistence boot (place AFTER DEFAULT_* are defined) ----
-ds.init_db(os.getenv("DB_PATH", r"M:\Engineering Projects\capacity.db"))  # or "capacity.db" locally
+
+
+# ---- Google Sheets boot (AFTER DEFAULT_* are defined) ----
+SHEET_ID = st.secrets.get("gsheet_id") or os.getenv("GSHEET_ID")
+CREDS = st.secrets.get("gcp_service_account")  # dict with service account JSON
+ds.init(SHEET_ID, CREDS)
 ds.seed_if_empty(DEFAULT_PROJECTS, DEFAULT_POTENTIAL, DEFAULT_ACTUAL, DEFAULT_DEPTS)
 
 _loaded = ds.load_all()
@@ -62,7 +66,6 @@ st.session_state.setdefault("projects",  _loaded["projects"])
 st.session_state.setdefault("potential", _loaded["potential"])
 st.session_state.setdefault("actual",    _loaded["actual"])
 st.session_state.setdefault("depts",     _loaded["depts"])
-
 
 # --------------------- SESSION STATE ---------------------
 if "projects" not in st.session_state:
@@ -149,6 +152,18 @@ if reset_btn:
     st.session_state.depts     = ref["depts"]
     st.toast("All datasets reset to defaults (DB + UI)", icon="↩️")
 # --------------------- BULK EDIT ---------------------
+with st.expander("Bulk Edit: Confirmed / Potential / Actual", expanded=False):
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        df_proj = st.data_editor(pd.DataFrame(st.session_state.projects), key="ed_confirmed", height=300)
+        st.session_state.projects = df_proj.astype(object).to_dict(orient="records")
+    with c2:
+        df_pot = st.data_editor(pd.DataFrame(st.session_state.potential), key="ed_potential", height=300)
+        st.session_state.potential = df_pot.astype(object).to_dict(orient="records")
+    with c3:
+        df_act = st.data_editor(pd.DataFrame(st.session_state.actual), key="ed_actual", height=300)
+        st.session_state.actual = df_act.astype(object).to_dict(orient="records")
+
 
     if st.button("Save bulk edits to DB", key="save_bulk", type="primary"):
         ds.replace_dataset("projects",  st.session_state.projects)
@@ -159,14 +174,19 @@ if reset_btn:
         st.session_state.projects  = ref["projects"]
         st.session_state.potential = ref["potential"]
         st.session_state.actual    = ref["actual"]
-        st.toast("Bulk edits saved to database ✔️")
+        st.toast("Bulk edits saved to Google Sheets ✔️")
+
+with st.expander("Edit Department Headcounts", expanded=False):
+    df_depts = st.data_editor(pd.DataFrame(st.session_state.depts), key="ed_depts", height=240)
+    df_depts["headcount"] = pd.to_numeric(df_depts["headcount"], errors="coerce").fillna(0).astype(int)
+    st.session_state.depts = df_depts.to_dict(orient="records")
 
 
     if st.button("Save headcounts to DB", key="save_depts", type="primary"):
         ds.save_depts(st.session_state.depts)
         ref = ds.load_all()
         st.session_state.depts = ref["depts"]
-        st.toast("Headcounts saved ✔️")
+        st.toast("Headcounts saved to Google Sheets ✔️")
 
 st.markdown("---")
 
