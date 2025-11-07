@@ -302,11 +302,15 @@ def list_projects_with_rowid(category: str) -> List[Dict[str, Any]]:
             except Exception:
                 p = {}
             clean = _normalize_project_payload(p, dept_keys)
-            clean["_rowid"] = int(r["rowid"])
+            rid = int(r["rowid"])
+            # Provide both keys: 'id' for your UI, and '_rowid' for compatibility
+            clean["id"] = rid
+            clean["_rowid"] = rid
             out.append(clean)
         return out
     finally:
         con.close()
+
 
 def create_project(payload: Dict[str, Any], category: str) -> Dict[str, Any]:
     """
