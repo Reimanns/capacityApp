@@ -21,6 +21,31 @@ try:
 except Exception:
     pass
 
+import streamlit as st
+
+# Ensure Google Sheets workbook (ds.SH) is opened
+if getattr(ds, "SH", None) is None:
+    if hasattr(ds, "connect_from_secrets"):
+        ds.connect_from_secrets()
+    elif hasattr(ds, "connect"):
+        ds.connect()
+    else:
+        # Fallback: initialize here using Streamlit secrets
+        import gspread
+        from google.oauth2.service_account import Credentials
+
+        SCOPES = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"], scopes=SCOPES
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(st.secrets["gsheets"]["spreadsheet_id"])
+        setattr(ds, "SH", sh)
+
+
 # --------------------- Sidebar Navigation ---------------------
 st.sidebar.header("Navigation")
 page = st.sidebar.radio("Go to", ["Dashboard", "Data Management"], index=0)
@@ -264,12 +289,9 @@ let HOURS_PER_FTE = 40;
 
 # --------------- Data helpers ---------------
 def read_all():
-    try:
-        # Preferred helper if your backend exposes it
-        return ds.get_all_datasets()
-    except Exception:
-        ref = ds.load_all()
-        return ref["projects"], ref["potential"], ref["actual"], ref["depts"]
+    ref = ds.load_all()  # returns dict with projects, potential, actual, depts
+    return ref["projects"], ref["potential"], ref["actual"], ref["depts"]
+
 
 def inject(html: str, projects, potential, actual, depts) -> str:
     code = (
