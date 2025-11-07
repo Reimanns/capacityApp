@@ -1,205 +1,42 @@
+# app.py
 import json
 from datetime import date
 from copy import deepcopy
-from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
+import streamlit.components.v1 as components
 
-st.set_page_config(layout="wide", page_title="Labor Capacity Dashboard")
+import data_store as ds  # <- your persistence layer from earlier
+
+st.set_page_config(layout="wide", page_title="Capacity & Load Dashboard")
+
 try:
     st.image("citadel_logo.png", width=200)
 except Exception:
     pass
 
-# --------------------- LOCAL JS FALLBACKS ---------------------
-
-def _read_asset(p: str) -> str:
-    """Read a JS asset from disk; if missing, return a safe warning script.
-    Place these files in ./assets/ :
-      - chart.umd.min.js
-      - chartjs-plugin-annotation.min.js
-      - echarts.min.js
-    """
-    try:
-        return Path(p).read_text(encoding="utf-8")
-    except Exception:
-        # Keep running even if files are missing (CDN may still succeed)
-        return f"console.warn('Missing {p}; charts may not render if CDN is blocked.');"
-
-CHART_JS_INLINE = _read_asset("assets/chart.umd.min.js")
-CHART_ANNO_INLINE = _read_asset("assets/chartjs-plugin-annotation.min.js")
-ECHARTS_INLINE = _read_asset("assets/echarts.min.js")
-
-# --------------------- DEFAULT DATA (YOUR SET) ---------------------
-DEFAULT_PROJECTS = [
-    {"number":"P7657","customer":"Kaiser","aircraftModel":"B737","scope":"Starlink","induction":"2025-11-15T00:00:00","delivery":"2025-11-25T00:00:00","Maintenance":93.57,"Structures":240.61,"Avionics":294.07,"Inspection":120.3,"Interiors":494.58,"Engineering":80.2,"Cabinet":0,"Upholstery":0,"Finish":13.37},
-    {"number":"P7611","customer":"Alpha Star","aircraftModel":"A340","scope":"Mx Check","induction":"2025-10-20T00:00:00","delivery":"2025-12-04T00:00:00","Maintenance":2432.23,"Structures":1252.97,"Avionics":737.04,"Inspection":1474.08,"Interiors":1474.08,"Engineering":0.0,"Cabinet":0,"Upholstery":0,"Finish":0.0},
-    {"number":"P7645","customer":"Kaiser","aircraftModel":"B737","scope":"Starlink","induction":"2025-11-30T00:00:00","delivery":"2025-12-10T00:00:00","Maintenance":93.57,"Structures":240.61,"Avionics":294.07,"Inspection":120.3,"Interiors":494.58,"Engineering":80.2,"Cabinet":0,"Upholstery":0,"Finish":13.37},
-    {"number":"P7426","customer":"Celestial","aircraftModel":"B757","scope":"Post Maintenance Discrepancies","induction":"2026-01-05T00:00:00","delivery":"2026-01-15T00:00:00","Maintenance":0.0,"Structures":0.0,"Avionics":0.0,"Inspection":0.0,"Interiors":0.0,"Engineering":0.0,"Cabinet":0,"Upholstery":0,"Finish":0.0},
-    {"number":"P7548","customer":"Ty Air","aircraftModel":"B737","scope":"CMS Issues","induction":"2025-10-20T00:00:00","delivery":"2025-10-30T00:00:00","Maintenance":0.0,"Structures":0.0,"Avionics":0.0,"Inspection":0.0,"Interiors":0.0,"Engineering":0.0,"Cabinet":0,"Upholstery":0,"Finish":0.0},
-    {"number":"P7706","customer":"Valkyrie","aircraftModel":"B737-MAX","scope":"Starlink, Mods","induction":"2025-10-31T00:00:00","delivery":"2025-11-25T00:00:00","Maintenance":123.3,"Structures":349.4,"Avionics":493.2,"Inspection":164.4,"Interiors":698.7,"Engineering":143.8,"Cabinet":61.6,"Upholstery":0,"Finish":20.6},
-    {"number":"P7685","customer":"Sands","aircraftModel":"B737-700","scope":"Starlink","induction":"2025-11-17T00:00:00","delivery":"2025-11-24T00:00:00","Maintenance":105.44,"Structures":224.1,"Avionics":303.14,"Inspection":118.62,"Interiors":474.48,"Engineering":79.08,"Cabinet":0,"Upholstery":0,"Finish":13.18},
-    {"number":"P7712","customer":"Ty Air","aircraftModel":"B737","scope":"Monthly and 6 Month Check","induction":"2025-11-04T00:00:00","delivery":"2025-12-21T00:00:00","Maintenance":893.0,"Structures":893.0,"Avionics":476.3,"Inspection":238.1,"Interiors":3453.0,"Engineering":0.0,"Cabinet":0,"Upholstery":0,"Finish":0.0},
-    {"number":"P7639/7711","customer":"Snap","aircraftModel":"B737","scope":"Starlink and MX Package","induction":"2025-12-01T00:00:00","delivery":"2025-12-15T00:00:00","Maintenance":132.1,"Structures":330.3,"Avionics":440.4,"Inspection":220.2,"Interiors":990.9,"Engineering":66.1,"Cabinet":0,"Upholstery":0,"Finish":22.0},
-]
-DEFAULT_POTENTIAL = [
-    {"number":"P7661","customer":"Sands","aircraftModel":"A340-500","scope":"C Check","induction":"2026-01-29T00:00:00","delivery":"2026-02-28T00:00:00","Maintenance":2629.44,"Structures":1709.14,"Avionics":723.1,"Inspection":1248.98,"Interiors":262.94,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-    {"number":"P7669","customer":"Sands","aircraftModel":"A319-133","scope":"C Check","induction":"2025-12-08T00:00:00","delivery":"2026-01-28T00:00:00","Maintenance":2029.67,"Structures":984.08,"Avionics":535.55,"Inspection":675.56,"Interiors":1906.66,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-    {"number":None,"customer":"Sands","aircraftModel":"B767-300","scope":"C Check","induction":"2026-09-15T00:00:00","delivery":"2026-12-04T00:00:00","Maintenance":0.0,"Structures":0.0,"Avionics":0.0,"Inspection":0.0,"Interiors":0.0,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-    {"number":"P7686","customer":"Polaris","aircraftModel":"B777","scope":"1A & 3A Mx Checks","induction":"2025-12-01T00:00:00","delivery":"2025-12-09T00:00:00","Maintenance":643.15,"Structures":287.36,"Avionics":150.52,"Inspection":177.89,"Interiors":109.47,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-    {"number":"P7430","customer":"Turkmen","aircraftModel":"B777","scope":"Maint/Recon/Refub","induction":"2025-11-10T00:00:00","delivery":"2026-07-13T00:00:00","Maintenance":12720.0,"Structures":12720.0,"Avionics":3180.0,"Inspection":3180.0,"Interiors":19080.0,"Engineering":3180,"Cabinet":3180,"Upholstery":3180,"Finish":3180},
-    {"number":"P7649","customer":"NEP","aircraftModel":"B767-300","scope":"Refurb","induction":"2026-02-02T00:00:00","delivery":"2026-07-13T00:00:00","Maintenance":2000.0,"Structures":2400.0,"Avionics":2800.0,"Inspection":800.0,"Interiors":4400.0,"Engineering":1800,"Cabinet":1600,"Upholstery":1200,"Finish":3000},
-    {"number":"P7689","customer":"Sands","aircraftModel":"B737-700","scope":"C1,C3,C6C7 Mx","induction":"2025-09-10T00:00:00","delivery":"2026-11-07T00:00:00","Maintenance":8097.77,"Structures":1124.69,"Avionics":899.75,"Inspection":787.28,"Interiors":337.14,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-    {"number":"P7690","customer":"Sands","aircraftModel":None,"scope":"C1,C2,C7 Mx","induction":"2025-05-25T00:00:00","delivery":"2025-07-22T00:00:00","Maintenance":3227.14,"Structures":2189.85,"Avionics":922.04,"Inspection":1152.55,"Interiors":4033.92,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-    {"number":"P7691","customer":"Sands","aircraftModel":"B737-700","scope":"C1,C2,C3,C7 Mx","induction":"2026-10-13T00:00:00","delivery":"2026-12-22T00:00:00","Maintenance":4038.3,"Structures":5115.18,"Avionics":1076.88,"Inspection":1346.1,"Interiors":1884.54,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-]
-DEFAULT_ACTUAL = []
-DEFAULT_DEPTS = [
-    {"name":"Maintenance","headcount":36,"key":"Maintenance"},
-    {"name":"Structures","headcount":22,"key":"Structures"},
-    {"name":"Avionics","headcount":15,"key":"Avionics"},
-    {"name":"Inspection","headcount":10,"key":"Inspection"},
-    {"name":"Interiors","headcount":11,"key":"Interiors"},
-    {"name":"Engineering","headcount":7,"key":"Engineering"},
-    {"name":"Cabinet","headcount":3,"key":"Cabinet"},
-    {"name":"Upholstery","headcount":7,"key":"Upholstery"},
-    {"name":"Finish","headcount":6,"key":"Finish"},
-]
-
-# --------------------- SESSION STATE ---------------------
-if "projects" not in st.session_state:
-    st.session_state.projects = deepcopy(DEFAULT_PROJECTS)
-if "potential" not in st.session_state:
-    st.session_state.potential = deepcopy(DEFAULT_POTENTIAL)
-if "actual" not in st.session_state:
-    st.session_state.actual = deepcopy(DEFAULT_ACTUAL)
-if "depts" not in st.session_state:
-    st.session_state.depts = deepcopy(DEFAULT_DEPTS)
-
-
-def dept_keys():
-    return [d["key"] for d in st.session_state.depts]
-
-# --------------------- QUICK EDIT (sidebar) ---------------------
-st.sidebar.header("Quick Edit")
-dataset_choice = st.sidebar.selectbox("Dataset", ["Confirmed","Potential","Actual"])
-dataset_key = {"Confirmed":"projects","Potential":"potential","Actual":"actual"}[dataset_choice]
-current_list = st.session_state[dataset_key]
-project_ids = [f'{(p.get("number") or "—")} — {(p.get("customer") or "Unknown")}' for p in current_list]
-select_existing = st.sidebar.selectbox("Project", ["➕ New Project"] + project_ids)
-
-with st.sidebar.form("quick_edit"):
-    if select_existing == "➕ New Project":
-        number = st.text_input("Project Number", "PXXXX")
-        customer = st.text_input("Customer", "")
-        aircraft = st.text_input("Aircraft Model", "")
-        scope = st.text_input("Scope", "")
-        induction = st.date_input("Induction", date(2025, 11, 1)).isoformat()
-        delivery  = st.date_input("Delivery",  date(2025, 11, 8)).isoformat()
-        hours_inputs = {k: st.number_input(f"{k} hours", min_value=0.0, value=0.0, step=1.0) for k in dept_keys()}
-    else:
-        idx = project_ids.index(select_existing)
-        proj = deepcopy(current_list[idx])
-        number = st.text_input("Project Number", str(proj.get("number") or ""))
-        customer = st.text_input("Customer", str(proj.get("customer") or ""))
-        aircraft = st.text_input("Aircraft Model", str(proj.get("aircraftModel") or ""))
-        scope = st.text_input("Scope", str(proj.get("scope") or ""))
-        induction = st.date_input("Induction", date.fromisoformat(str(proj["induction"])[:10])).isoformat()
-        delivery  = st.date_input("Delivery",  date.fromisoformat(str(proj["delivery"])[:10])).isoformat()
-        hours_inputs = {k: st.number_input(f"{k} hours", min_value=0.0, value=float(proj.get(k, 0) or 0), step=1.0) for k in dept_keys()}
-
-    colA, colB = st.columns(2)
-    with colA:
-        apply_btn = st.form_submit_button("Apply Changes", use_container_width=True)
-    with colB:
-        reset_btn = st.form_submit_button("Reset to Defaults", use_container_width=True)
-
-if apply_btn:
-    entry = {"number": number.strip(), "customer": customer.strip(), "aircraftModel": aircraft.strip(),
-             "scope": scope.strip(), "induction": induction, "delivery": delivery}
-    for k in dept_keys():
-        entry[k] = float(hours_inputs[k] or 0.0)
-    if select_existing == "➕ New Project":
-        st.session_state[dataset_key].append(entry)
-    else:
-        st.session_state[dataset_key][idx] = entry
-    st.toast("Dataset updated", icon="✅")
-
-if reset_btn:
-    st.session_state.projects  = deepcopy(DEFAULT_PROJECTS)
-    st.session_state.potential = deepcopy(DEFAULT_POTENTIAL)
-    st.session_state.actual    = deepcopy(DEFAULT_ACTUAL)
-    st.session_state.depts     = deepcopy(DEFAULT_DEPTS)
-    st.toast("All datasets reset to defaults", icon="↩️")
-
-# --------------------- BULK EDIT ---------------------
-with st.expander("Bulk Edit: Confirmed / Potential / Actual", expanded=False):
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        df_proj = st.data_editor(pd.DataFrame(st.session_state.projects), key="ed_confirmed", height=300)
-        st.session_state.projects = df_proj.astype(object).to_dict(orient="records")
-    with c2:
-        df_pot = st.data_editor(pd.DataFrame(st.session_state.potential), key="ed_potential", height=300)
-        st.session_state.potential = df_pot.astype(object).to_dict(orient="records")
-    with c3:
-        df_act = st.data_editor(pd.DataFrame(st.session_state.actual), key="ed_actual", height=300)
-        st.session_state.actual = df_act.astype(object).to_dict(orient="records")
-
-with st.expander("Edit Department Headcounts", expanded=False):
-    df_depts = st.data_editor(pd.DataFrame(st.session_state.depts), key="ed_depts", height=240)
-    df_depts["headcount"] = pd.to_numeric(df_depts["headcount"], errors="coerce").fillna(0).astype(int)
-    st.session_state.depts = df_depts.to_dict(orient="records")
-
-st.markdown("---")
-
-# --------------------- HTML/JS ---------------------
-html_template = r"""
+# -------------------------------------------------------------------
+# Keep your original HTML/JS INTACT here:
+# (This is exactly the template you pasted earlier; I have not edited it.
+#  We only inject data and flip default-checked toggles at render-time.)
+# -------------------------------------------------------------------
+HTML_TEMPLATE = r"""
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8" />
   <title>Labor Capacity Dashboard</title>
 
-  <!-- Chart.js + annotation: try CDN, then inline fallback -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"
-          onerror="window._chartCdnFailed=true;"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.2/dist/chartjs-plugin-annotation.min.js"
-          onerror="window._chartAnnoCdnFailed=true;"></script>
+  <!-- Chart.js core + annotation -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.2/dist/chartjs-plugin-annotation.min.js"></script>
   <script>
-  (function(){
-    if (!window.Chart || window._chartCdnFailed) {
-      /* __CHART_JS_INLINE__ */
-    }
-    if (!window['chartjs-plugin-annotation'] || window._chartAnnoCdnFailed) {
-      /* __CHART_ANNO_INLINE__ */
-    }
     try { if (window['chartjs-plugin-annotation']) { Chart.register(window['chartjs-plugin-annotation']); } } catch(e) {}
-  })();
   </script>
 
-  <!-- ECharts: try CDN, then inline fallback -->
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"
-          onerror="window._echartsCdnFailed=true;"></script>
-  <script>
-  if (!window.echarts || window._echartsCdnFailed) {
-    /* __ECHARTS_INLINE__ */
-  }
-  </script>
-
-  <!-- Tiny diagnostic banner -->
-  <script>
-  (function(){
-    function note(msg){
-      var d=document.createElement('div');
-      d.style.cssText='margin:8px 14px;padding:8px;border-radius:8px;border:1px solid #eab308;background:#fef9c3;color:#713f12;font:12px/1.3 system-ui,sans-serif';
-      d.textContent=msg; document.addEventListener('DOMContentLoaded', function(){ document.body.prepend(d); });
-    }
-    if (!window.Chart)   note('Chart.js not available — using local fallback or blocked by network.');
-    if (!window.echarts) note('ECharts not available — using local fallback or blocked by network.');
-  })();
-  </script>
+  <!-- ECharts for Sankey & Treemap (reliable UMD build) -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 
   <style>
     :root{
@@ -225,8 +62,10 @@ html_template = r"""
     .footnote { text-align:center; color:#6b7280; font-size:12px; }
 
     /* Anchored popover for drilldown */
-    .popover { display:none; position:fixed; z-index:9999; max-width:min(92vw, 900px);
-      background:#fff; border:1px solid #e5e7eb; border-radius:12px; box-shadow:0 12px 30px rgba(0,0,0,0.2); }
+    .popover {
+      display:none; position:fixed; z-index:9999; max-width:min(92vw, 900px);
+      background:#fff; border:1px solid #e5e7eb; border-radius:12px; box-shadow:0 12px 30px rgba(0,0,0,0.2);
+    }
     .popover header { padding:10px 12px; border-bottom:1px solid #eee; font-weight:600; display:flex; justify-content:space-between; gap:10px; align-items:center; }
     .popover header button { border:none; background:#f3f4f6; border-radius:8px; padding:4px 8px; cursor:pointer; }
     .popover .content { padding:10px 12px 12px; max-height:60vh; overflow:auto; }
@@ -234,7 +73,10 @@ html_template = r"""
     .popover th, .popover td { border-bottom:1px solid #eee; padding:6px 8px; text-align:left; font-size:13px; }
 
     /* What-If panel */
-    .impact-grid{ display:grid; gap:10px; grid-template-columns: repeat(6, minmax(120px,1fr)); align-items:end; margin:10px 0 6px; }
+    .impact-grid{
+      display:grid; gap:10px; grid-template-columns: repeat(6, minmax(120px,1fr));
+      align-items:end; margin:10px 0 6px;
+    }
     .impact-grid label{ font-size:12px; color:#374151; display:flex; flex-direction:column; gap:6px; }
     .impact-grid input, .impact-grid select, .impact-grid button{ padding:8px; border:1px solid #e5e7eb; border-radius:8px; font-size:13px;}
     .impact-grid button{ cursor:pointer; background:#111827; color:#fff; border-color:#111827; }
@@ -251,12 +93,39 @@ html_template = r"""
     .manual-grid label { font-size:12px; color:#374151; display:flex; flex-direction:column; gap:6px; }
     .manual-hours { display:grid; gap:8px; grid-template-columns: repeat(6, minmax(100px,1fr)); margin-top:10px; }
 
+    /* ——— Normalize manual "hours" inputs to match the rest ——— */
     .manual-panel input,
     .manual-panel select,
-    .manual-hours input { font-size: 13px; line-height: 1.25; padding: 8px 10px; border: 1px solid #e5e7eb; border-radius: 8px; width: 100%; box-sizing: border-box; }
-    .manual-hours label { font-size: 12px; display: flex; flex-direction: column; gap: 6px; }
-    .manual-grid, .manual-hours { align-items: end; }
+    .manual-hours input {
+      font-size: 13px;
+      line-height: 1.25;
+      padding: 8px 10px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      width: 100%;
+      box-sizing: border-box;
+    }
 
+    .manual-hours label {
+      font-size: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .manual-grid,
+    .manual-hours {
+      align-items: end;
+    }
+    .manual-panel input[type="number"] {
+      -moz-appearance: textfield;
+      appearance: textfield;
+    }
+    .manual-panel input[type="number"]::-webkit-outer-spin-button,
+    .manual-panel input[type="number"]::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
     /* Hangar Bay Planner */
     .hangar-wrap { margin-top:14px; }
     .hangar-controls { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin:8px 0 10px; }
@@ -270,6 +139,7 @@ html_template = r"""
     .hcell.occupied { background:#dcfce7; border-color:#bbf7d0; }               /* green: has aircraft */
     .hcell.occupied.split { border:1px dashed #86efac; }                        /* keep dashed edge for split */
     .hcell.conflict { background:#fee2e2; border-color:#fecaca; color:#991b1b; font-weight:600; } /* red */
+
 
     /* Snapshot breakdown */
     details.snapshot { border:1px solid #e5e7eb; border-radius:10px; padding:8px 12px; background:#fafafa; margin:10px 0 2px; }
@@ -293,7 +163,7 @@ html_template = r"""
   <label for="disciplineSelect"><strong>Discipline:</strong></label>
   <select id="disciplineSelect"></select>
 
-  <label><input type="checkbox" id="showPotential"> Show Potential</label>
+  <label><input type="checkbox" id="showPotential" checked> Show Potential</label>
   <label><input type="checkbox" id="showActual"> Show Actual</label>
 
   <label><strong>Timeline:</strong>
@@ -637,7 +507,7 @@ const annos = { annotations:{ todayLine:{ type:'line', xMin: weekTodayLabel, xMa
 const ctx = document.getElementById('myChart').getContext('2d');
 let currentKey = sel.value;
 let currentPeriod = 'weekly';
-let showPotential = false; // default OFF
+let showPotential = true;
 let showActual = false;
 let utilSeparate = true;
 let utilChart = null;
@@ -1105,6 +975,8 @@ function gatherSnapshotBreakdown(){
   return { totalByProj:Object.fromEntries(totalByProj), byStatus:aggStatusRows, total };
 }
 
+ 
+
 function rebuildSnapshot(){
   const sankeyDiv=document.getElementById('sankeyDiv');
   const treemapDiv=document.getElementById('treemapDiv');
@@ -1207,7 +1079,7 @@ function rebuildSnapshot(){
         data: groups,
         label:{ show:true, formatter:(p)=>{
           const v=+p.value||0; const pct= total>0 ? Math.round(v/total*100) : 0;
-          return `${p.name}\\n${v.toFixed(0)} hrs • ${pct}%`;
+          return `${p.name}\n${v.toFixed(0)} hrs • ${pct}%`;
         }}
       }]
     });
@@ -1245,7 +1117,8 @@ const bayOverrides = [
   { number: 'P7611', slot: 'H1' },
   { number: 'P7706', slot: 'D2' },
   { number: 'P7712', slot: 'D3' },
-  // optional time-box fields: from:'YYYY-MM-DD', to:'YYYY-MM-DD'
+  // You can optionally time-box any override:
+  // { number:'P7611', slot:'H1', from:'2025-10-20', to:'2025-12-04' }
 ];
 
 function findProjectByNumber(num){
@@ -1255,19 +1128,25 @@ function findProjectByNumber(num){
 }
 
 function isOverrideActive(ovr, periodStart, periodEnd){
+  // If override has explicit from/to, honor them
   if (ovr.from || ovr.to){
     const from = ovr.from ? parseDateLocalISO(ovr.from) : new Date(-8640000000000000);
     const to   = ovr.to   ? parseDateLocalISO(ovr.to)   : new Date( 8640000000000000);
     return !(to < periodStart || from > periodEnd);
   }
+
+  // Otherwise, auto-derive from the project’s own induction/delivery
   const p = findProjectByNumber(ovr.number);
   if (p && p.induction && p.delivery){
     const a = parseDateLocalISO(p.induction);
     const b = parseDateLocalISO(p.delivery);
     if (!isNaN(a) && !isNaN(b)) return !(b < periodStart || a > periodEnd);
   }
+
+  // Fallback: if we can’t resolve dates, let the remaining/active check handle it
   return true;
 }
+
 
 function slotToBay(slot, H, D){
   if (slot === 'H1') return H[0];
@@ -1278,6 +1157,7 @@ function slotToBay(slot, H, D){
   return null;
 }
 
+
 const planIncPot = document.getElementById('planIncludePotential');
 const planPeriods = document.getElementById('planPeriods');
 const planFrom = document.getElementById('planFrom');
@@ -1286,9 +1166,10 @@ const hangarGrid = document.getElementById('hangarGrid');
 function setPlannerDefaultDates(){
   const labels = currentLabels();
   if (!labels.length) return;
+  const first = parseDateLocalISO(labels[0]);
   const today = new Date();
-  // start at the most recent label >= today, else the first label
-  let start = parseDateLocalISO(labels[0]);
+  // default to the first label >= today, else the first label
+  let start = first;
   for (const lbl of labels){
     const d = parseDateLocalISO(lbl);
     if (d >= today) { start = d; break; }
@@ -1315,9 +1196,10 @@ function classifyAircraft(model){
   if (s.startsWith('B777') || s.startsWith('B747') || s.startsWith('A340') || s.startsWith('A330')) return 'HEAVY';
   if (s.startsWith('B757')) return 'M757';
   if (s.startsWith('B737') || s.startsWith('A319')) return 'SMALL';
-  return null;
+  return null; // ignore unrecognized
 }
 
+// Period bounds (reuse logic consistent with charts)
 function periodBoundsForIndex(i){
   const L = parseDateLocalISO(currentLabels()[i]);
   const start = (currentPeriod==='weekly') ? mondayOf(L) : firstOfMonth(L);
@@ -1337,7 +1219,13 @@ function activeProjectsForIdx(i, includePotential){
       if(overlaps(a,b,start,end) && p.aircraftModel){
         const cls = classifyAircraft(p.aircraftModel);
         if(!cls) continue;
-        arr.push({ number: p.number || '—', customer: p.customer || 'Unknown', model: p.aircraftModel, short: modelShort(p.aircraftModel), cls });
+        arr.push({
+          number: p.number || '—',
+          customer: p.customer || 'Unknown',
+          model: p.aircraftModel,
+          short: modelShort(p.aircraftModel),
+          cls
+        });
       }
     }
   }
@@ -1346,34 +1234,52 @@ function activeProjectsForIdx(i, includePotential){
   return arr;
 }
 
+/*
+Assignment model we render per period:
+Hangar H: 2 bays (H1, H2). Each bay: either HEAVY (1), M757 (1), SPLIT(2 SMALL), or SINGLE SMALL (1).
+Hangar D: bay1, bay2 (each can be 1×M757 OR SPLIT(2 SMALL); at most ONE of bay1/bay2 split in the same period); bay3 = SINGLE (1×M757 or 1×SMALL).
+Greedy, stable, readable – not “optimal packing”, but works and flags conflicts.
+*/
 function assignForPeriod(aircraftList, periodIndex){
   const { start, end } = periodBoundsForIndex(periodIndex);
 
+  // Bays
   const H = [{kind:'EMPTY', slots:[]}, {kind:'EMPTY', slots:[]}];
   const D = [{kind:'EMPTY', slots:[]}, {kind:'EMPTY', slots:[]}, {kind:'EMPTY', slots:[]}];
   const conflicts = [];
 
-  const remaining = aircraftList.slice();
+  // Place pinned projects first, remove them from the working list
+  const remaining = aircraftList.slice(); // shallow copy
   for (const ovr of bayOverrides){
     if (!isOverrideActive(ovr, start, end)) continue;
     const idx = remaining.findIndex(a => a.number === ovr.number);
     if (idx === -1) continue;
-    const p = remaining.splice(idx, 1)[0];
+
+    const p = remaining.splice(idx, 1)[0];   // take it out of the pool
     const bay = slotToBay(ovr.slot, H, D);
+
+    // Validate slot compatibility (HEAVY only in H1/H2; others can go anywhere that fits)
     if (!bay || bay.kind !== 'EMPTY') { conflicts.push(p); continue; }
     if (p.cls === 'HEAVY' && !/^H[12]$/.test(ovr.slot)) { conflicts.push(p); continue; }
+
     if (p.cls === 'HEAVY') { bay.kind='HEAVY';  bay.slots=[p]; }
     else if (p.cls === 'M757'){ bay.kind='M757';  bay.slots=[p]; }
     else if (p.cls === 'SMALL'){ bay.kind='SMALL1'; bay.slots=[p]; }
     else { conflicts.push(p); }
   }
 
+  // Split remaining by type
   const heavies = remaining.filter(x=>x.cls==='HEAVY');
   const m757s   = remaining.filter(x=>x.cls==='M757');
   const smalls  = remaining.filter(x=>x.cls==='SMALL');
 
-  function takeFirstEmptyBay(cands){ for(const b of cands){ if(b.kind==='EMPTY') return b; } return null; }
+  // Helper for later
+  function takeFirstEmptyBay(cands){
+    for(const b of cands){ if(b.kind==='EMPTY') return b; }
+    return null;
+  }
 
+  // 1) Place HEAVIES (only H)
   while (heavies.length){
     const p = heavies.shift();
     const bay = (H[0].kind==='EMPTY') ? H[0] : (H[1].kind==='EMPTY' ? H[1] : null);
@@ -1381,6 +1287,7 @@ function assignForPeriod(aircraftList, periodIndex){
     bay.kind='HEAVY'; bay.slots=[p];
   }
 
+  // 2) Place 757s – prefer D2 → D1 → free H → D3
   while (m757s.length){
     const p = m757s.shift();
     const bay = takeFirstEmptyBay([D[1], D[0], H[0], H[1], D[2]]);
@@ -1388,6 +1295,8 @@ function assignForPeriod(aircraftList, periodIndex){
     bay.kind='M757'; bay.slots=[p];
   }
 
+  // 3) Place SMALLs
+  // Decide D side split (only one of D1/D2 may split)
   let dSplitIdx = null;
   if (smalls.length >= 2){
     if (D[0].kind==='EMPTY' && D[1].kind!=='SPLIT' && D[1].kind!=='M757') dSplitIdx = 0;
@@ -1395,64 +1304,85 @@ function assignForPeriod(aircraftList, periodIndex){
     if (dSplitIdx===null && D[0].kind==='EMPTY' && D[1].kind==='EMPTY') dSplitIdx = 0;
   }
 
-  function splitIfHelpful(bay){ if (smalls.length >= 2 && bay.kind==='EMPTY'){ bay.kind='SPLIT'; bay.slots=[]; return true; } return false; }
+  // Split H bays first if helpful
+  function splitIfHelpful(bay){
+    if (smalls.length >= 2 && bay.kind==='EMPTY'){ bay.kind='SPLIT'; bay.slots=[]; return true; }
+    return false;
+  }
   splitIfHelpful(H[0]); splitIfHelpful(H[1]);
   if (dSplitIdx!==null && D[dSplitIdx].kind==='EMPTY'){ D[dSplitIdx].kind='SPLIT'; D[dSplitIdx].slots=[]; }
 
+  // Fill split bays (2 small per split)
   for (const bay of [H[0],H[1],D[0],D[1]]){
     if (bay.kind==='SPLIT'){
       while (smalls.length && bay.slots.length<2){ bay.slots.push(smalls.shift()); }
     }
   }
 
+  // Any leftover smalls into single slots
   function pushSmallIntoAnySingle(p){
+    // Free slot in a split?
     for(const bay of [H[0],H[1],D[0],D[1]]){
       if (bay.kind==='SPLIT' && bay.slots.length<2){ bay.slots.push(p); return true; }
     }
+    // Else any empty single
     const cand = takeFirstEmptyBay([H[0],H[1],D[2],D[0],D[1]]);
     if (cand){ cand.kind='SMALL1'; cand.slots=[p]; return true; }
     return false;
   }
-  while (smalls.length){ const p = smalls.shift(); if(!pushSmallIntoAnySingle(p)){ conflicts.push(p); } }
-
-  function bayCell(bay){
-    const label = (p)=> `${p.number || '—'} — ${p.customer || 'Unknown'}`;
-    const tip   = (p)=> p.model || (p.short || '');
-    if (bay.kind === 'EMPTY') { return { cls:'empty', text:'—', tips:[] }; }
-    if (bay.kind === 'SPLIT') {
-      const texts = bay.slots.map(label).join(' | ');
-      const tips  = bay.slots.map(tip);
-      return { cls:'occupied split', text: texts || '—', tips };
-    }
-    const s = bay.slots[0];
-    return { cls:'occupied', text: label(s), tips:[tip(s)] };
+  while (smalls.length){
+    const p = smalls.shift();
+    if(!pushSmallIntoAnySingle(p)){ conflicts.push(p); }
   }
 
-  return {
-    H: [bayCell(H[0]), bayCell(H[1])],
-    D: [bayCell(D[0]), bayCell(D[1]), bayCell(D[2])],
-    conflicts
-  };
+  // Render cell objects
+  function bayCell(bay){
+  const label = (p)=> `${p.number || '—'} — ${p.customer || 'Unknown'}`;
+  const tip   = (p)=> p.model || (p.short || ''); // tooltip shows aircraft type
+
+  if (bay.kind === 'EMPTY') {
+    return { cls:'empty', text:'—', tips:[] };
+  }
+  if (bay.kind === 'SPLIT') {
+    // two SMALL slots packed in one bay — still "occupied", but dashed border to hint split
+    const texts = bay.slots.map(label).join(' | ');
+    const tips  = bay.slots.map(tip);
+    return { cls:'occupied split', text: texts || '—', tips };
+  }
+
+  // Any single-aircraft occupancy (HEAVY, M757, SMALL1)
+  const s = bay.slots[0];
+  return { cls:'occupied', text: label(s), tips:[tip(s)] };
 }
 
+
 function buildPlannerGrid(indices){
+  // Build header + 6 rows: H1, H2, D1, D2, D3, Conflicts
   const cols = indices.length + 1; // +1 for row header
   let html = `<div class="hgrid" style="grid-template-columns: 180px repeat(${indices.length}, minmax(110px,1fr));">`;
 
+  // Header row
   html += `<div class="hcell header rowhdr"></div>`;
-  for(const i of indices){ const lbl = currentLabels()[i]; html += `<div class="hcell header">${lbl}</div>`; }
+  for(const i of indices){
+    const lbl = currentLabels()[i];
+    html += `<div class="hcell header">${lbl}</div>`;
+  }
 
   function row(title, getter){
     html += `<div class="hcell rowhdr">${title}</div>`;
     for(const i of indices){
       const cell = getter(i);
-      const tip = (cell.tips && cell.tips.length) ? `title="${cell.tips.join(' \\n ')}"` : '';
+      const tip = (cell.tips && cell.tips.length) ? `title="${cell.tips.join(' \n ')}"` : '';
       html += `<div class="hcell ${cell.cls}" ${tip}>${cell.text}</div>`;
     }
   }
 
+  // Precompute assignments
   const includePot = planIncPot.checked;
-  const assigned = indices.map(i=>{ const act = activeProjectsForIdx(i, includePot); return assignForPeriod(act, i); });
+  const assigned = indices.map(i=>{
+    const act = activeProjectsForIdx(i, includePot);
+    return assignForPeriod(act, i);
+  });
 
   row('Hangar H — Bay 1', (i)=> assigned[indices.indexOf(i)].H[0]);
   row('Hangar H — Bay 2', (i)=> assigned[indices.indexOf(i)].H[1]);
@@ -1460,11 +1390,17 @@ function buildPlannerGrid(indices){
   row('Hangar D — Bay 2', (i)=> assigned[indices.indexOf(i)].D[1]);
   row('Hangar D — Bay 3', (i)=> assigned[indices.indexOf(i)].D[2]);
 
+  // Conflicts row: red cell if any conflicts
   html += `<div class="hcell rowhdr">Conflicts</div>`;
-  for (const pack of assigned){
-    if (!pack.conflicts.length){ html += `<div class="hcell empty">0</div>`; }
-    else { const txt = pack.conflicts.map(c=>`${c.short} (${c.number})`).join(', '); html += `<div class="hcell conflict" title="${txt}">${pack.conflicts.length}</div>`; }
-  }
+    for (const pack of assigned){
+        if (!pack.conflicts.length){
+            html += `<div class="hcell empty">0</div>`;
+        } else {
+        const txt = pack.conflicts.map(c=>`${c.short} (${c.number})`).join(', ');
+        html += `<div class="hcell conflict" title="${txt}">${pack.conflicts.length}</div>`;
+        }
+    }
+
 
   html += `</div>`;
   hangarGrid.innerHTML = html;
@@ -1474,6 +1410,7 @@ function rebuildPlanner(){
   const labels = currentLabels();
   if (!labels.length){ hangarGrid.innerHTML = ''; return; }
 
+  // choose subset based on planFrom + planPeriods
   const startDate = parseDateLocalISO(planFrom.value) || parseDateLocalISO(labels[0]);
   const idxs = [];
   for(let i=0;i<labels.length;i++){
@@ -1486,6 +1423,7 @@ function rebuildPlanner(){
 planIncPot.addEventListener('change', rebuildPlanner);
 planPeriods.addEventListener('change', rebuildPlanner);
 planFrom.addEventListener('change', ()=>{ 
+  // clamp to available labels
   const d = parseDateLocalISO(planFrom.value);
   const {min,max} = labelsMinMaxDates();
   let v = d;
@@ -1514,16 +1452,228 @@ rebuildPlanner();
 </html>
 """
 
-# Inject live data and inline JS fallbacks
-html_code = (
-    html_template
-      .replace("__PROJECTS__", json.dumps(st.session_state.projects))
-      .replace("__POTENTIAL__", json.dumps(st.session_state.potential))
-      .replace("__ACTUAL__", json.dumps(st.session_state.actual))
-      .replace("__DEPTS__", json.dumps(st.session_state.depts))
-      .replace("__CHART_JS_INLINE__", CHART_JS_INLINE)
-      .replace("__CHART_ANNO_INLINE__", CHART_ANNO_INLINE)
-      .replace("__ECHARTS_INLINE__", ECHARTS_INLINE)
-)
+# -----------------------------------
+# Backend: seed DB if empty
+# -----------------------------------
+ds.seed_if_empty()  # seeds departments on first run; projects remain whatever is in DB
 
-components.html(html_code, height=2600, scrolling=False)
+def dept_keys():
+    return [d["key"] for d in ds.list_departments()]
+
+# -----------------------------------
+# Sidebar navigation
+# -----------------------------------
+st.sidebar.header("Navigation")
+view = st.sidebar.radio("Go to", ["Dashboard", "Admin / Manage Data"], index=0)
+
+# ======================================================================
+#                              ADMIN VIEW
+# ======================================================================
+if view == "Admin / Manage Data":
+    st.title("Admin / Manage Data")
+
+    tabs = st.tabs(["📄 Projects (CRUD)", "📤 Bulk Import", "👥 Departments"])
+
+    # ---- Projects CRUD ----
+    with tabs[0]:
+        st.subheader("Projects (Confirmed / Potential / Actual)")
+
+        category = st.selectbox("Category", ["confirmed", "potential", "actual"], index=0)
+        rows = ds.list_projects(category)
+
+        def label_for(p):
+            pn = p.get("number") or "—"
+            cust = p.get("customer") or "Unknown"
+            return f'{pn} — {cust} (id:{p["id"]})'
+
+        choices = ["➕ New Project"] + [label_for(p) for p in rows]
+        pick = st.selectbox("Select", choices, index=0)
+
+        dkeys = dept_keys()
+
+        if pick == "➕ New Project":
+            proj = {"number":"PXXXX","customer":"","aircraftModel":"","scope":"",
+                    "induction":None,"delivery":None, **{k:0.0 for k in dkeys}}
+            proj_id = None
+        else:
+            idx = choices.index(pick) - 1
+            proj = deepcopy(rows[idx])
+            proj_id = proj["id"]
+
+        with st.form("proj_form"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                number   = st.text_input("Project Number", value=str(proj.get("number") or ""))
+                customer = st.text_input("Customer", value=str(proj.get("customer") or ""))
+                aircraft = st.text_input("Aircraft Model", value=str(proj.get("aircraftModel") or ""))
+            with c2:
+                scope    = st.text_input("Scope", value=str(proj.get("scope") or ""))
+                ind_date = st.date_input(
+                    "Induction",
+                    value=(
+                        date.fromisoformat(str(proj["induction"])[:10])
+                        if proj.get("induction") else date.today()
+                    ),
+                )
+            with c3:
+                del_date = st.date_input(
+                    "Delivery",
+                    value=(
+                        date.fromisoformat(str(proj["delivery"])[:10])
+                        if proj.get("delivery") else date.today()
+                    ),
+                )
+                st.caption("Dates are stored as YYYY-MM-DD.")
+
+            st.markdown("**Department Hours**")
+            cols = st.columns(3)
+            hours_inputs = {}
+            for i, k in enumerate(dkeys):
+                with cols[i % 3]:
+                    hours_inputs[k] = st.number_input(
+                        f"{k} hours",
+                        min_value=0.0,
+                        value=float(proj.get(k, 0.0) or 0.0),
+                        step=1.0,
+                    )
+
+            b1, b2, b3 = st.columns([1,1,1])
+            with b1:
+                save_btn = st.form_submit_button("💾 Save / Update", use_container_width=True)
+            with b2:
+                del_btn = st.form_submit_button("🗑️ Delete", use_container_width=True) if proj_id is not None else None
+            with b3:
+                refresh_btn = st.form_submit_button("🔄 Refresh List", use_container_width=True)
+
+        if save_btn:
+            payload = {
+                "number": number.strip() or None,
+                "customer": customer.strip() or None,
+                "aircraftModel": aircraft.strip() or None,
+                "scope": scope.strip() or None,
+                "induction": ind_date.isoformat(),
+                "delivery": del_date.isoformat(),
+                "category": category,
+            }
+            for k in dkeys:
+                payload[k] = float(hours_inputs[k] or 0.0)
+
+            if proj_id is None:
+                created = ds.create_project(payload, category=category)
+                st.success(f"Created project id {created['id']} in {category}.")
+            else:
+                updated = ds.update_project(proj_id, payload)
+                st.success(f"Updated project id {updated['id']} in {updated['category']}.")
+
+            st.rerun()
+
+        if del_btn and proj_id is not None:
+            ds.delete_project(proj_id)
+            st.warning(f"Deleted project id {proj_id}.")
+            st.rerun()
+
+        if refresh_btn:
+            st.rerun()
+
+        st.markdown("---")
+        st.write(f"**{category.capitalize()} projects**")
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No projects in this category yet.")
+
+    # ---- Bulk Import ----
+    with tabs[1]:
+        st.subheader("Bulk Import CSV/XLSX → Projects")
+        st.caption(
+            "Columns accepted: number, customer, aircraftModel, scope, induction, delivery, "
+            "and dept-hour columns (Maintenance, Structures, Avionics, Inspection, Interiors, Engineering, Cabinet, Upholstery, Finish)."
+        )
+        import_cat = st.radio("Import into category", ["confirmed", "potential", "actual"], horizontal=True)
+        up = st.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx", "xls"])
+        if up and st.button("Import"):
+            try:
+                result = ds.bulk_import_projects(up, category=import_cat)
+                st.success(f"Imported {result['imported']} rows. Error rows: {result['errors']}")
+            except Exception as e:
+                st.error(f"Import failed: {e}")
+
+    # ---- Departments ----
+    with tabs[2]:
+        st.subheader("Department Headcounts")
+        depts = ds.list_departments()
+        df = pd.DataFrame(depts)
+        new = st.data_editor(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={"key": st.column_config.TextColumn(disabled=True)},
+        )
+        if st.button("Save Headcounts"):
+            new["headcount"] = pd.to_numeric(new["headcount"], errors="coerce").fillna(0).astype(int)
+            saved = ds.upsert_departments(new.to_dict(orient="records"))
+            st.success("Departments saved.")
+            st.dataframe(pd.DataFrame(saved), use_container_width=True, hide_index=True)
+
+# ======================================================================
+#                             DASHBOARD VIEW
+# ======================================================================
+else:
+    st.title("Capacity & Load Dashboard")
+
+    # Pull live datasets
+    data = ds.get_all_datasets()
+    confirmed = data["projects"]
+    potential_all = data["potential"]
+    actual = data["actual"]
+    depts = data["depts"]
+
+    # Server-side filter: choose which potential projects to include
+    st.subheader("Filters (Server-side)")
+    if potential_all:
+        pot_labels = [f'{p.get("number") or "—"} — {p.get("customer") or "Unknown"}' for p in potential_all]
+        selected = st.multiselect(
+            "Include only these Potential projects (leave empty = include all):",
+            pot_labels,
+            default=[],
+        )
+        if selected:
+            selected_numbers = set((lbl.split(" — ", 1)[0] or "").strip() for lbl in selected)
+            potential = [p for p in potential_all if (p.get("number") or "") in selected_numbers]
+        else:
+            potential = potential_all
+    else:
+        st.info("No Potential projects in DB.")
+        potential = []
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("🔄 Refresh data"):
+            st.rerun()
+    with c2:
+        snapshot = {"projects": confirmed, "potential": potential, "actual": actual, "depts": depts}
+        st.download_button(
+            "⬇️ Download snapshot (JSON)",
+            data=json.dumps(snapshot, indent=2),
+            file_name="capacity_snapshot.json",
+            mime="application/json",
+        )
+    with c3:
+        st.caption("All charts below are fed by data from your database.")
+
+    # Inject live data into HTML, and flip default checkboxes for Potential to OFF
+    def inject(html: str) -> str:
+        code = (
+            html.replace("__PROJECTS__", json.dumps(confirmed))
+                .replace("__POTENTIAL__", json.dumps(potential))
+                .replace("__ACTUAL__", json.dumps(actual))
+                .replace("__DEPTS__", json.dumps(depts))
+        )
+        # Keep template intact; just flip default-checked to unchecked at render-time
+        code = code.replace('id="showPotential" checked', 'id="showPotential"')
+        code = code.replace('id="snapPotential" checked', 'id="snapPotential"')
+        code = code.replace('id="planIncludePotential" checked', 'id="planIncludePotential"')
+        return code
+
+    html_code = inject(HTML_TEMPLATE)
+    components.html(html_code, height=2600, scrolling=False)
