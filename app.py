@@ -1,28 +1,198 @@
-# app.py
+
 import json
 from datetime import date
 from copy import deepcopy
 
 import streamlit as st
-import pandas as pd
 import streamlit.components.v1 as components
+import pandas as pd
 
-import data_store as ds  # <- your persistence layer from earlier
-ds.init()
-
-st.set_page_config(layout="wide", page_title="Capacity & Load Dashboard")
-
+st.set_page_config(layout="wide", page_title="Labor Capacity Dashboard")
 try:
     st.image("citadel_logo.png", width=200)
 except Exception:
     pass
 
-# -------------------------------------------------------------------
-# Keep your original HTML/JS INTACT here:
-# (This is exactly the template you pasted earlier; I have not edited it.
-#  We only inject data and flip default-checked toggles at render-time.)
-# -------------------------------------------------------------------
-HTML_TEMPLATE = r"""
+# --------------------- DEFAULT DATA (YOUR SET) ---------------------
+DEFAULT_PROJECTS = [
+    {"number":"P7657","customer":"Kaiser","aircraftModel":"B737","scope":"Starlink","induction":"2025-11-15T00:00:00","delivery":"2025-11-25T00:00:00","Maintenance":93.57,"Structures":240.61,"Avionics":294.07,"Inspection":120.3,"Interiors":494.58,"Engineering":80.2,"Cabinet":0,"Upholstery":0,"Finish":13.37},
+    {"number":"P7611","customer":"Alpha Star","aircraftModel":"A340","scope":"Mx Check","induction":"2025-10-20T00:00:00","delivery":"2025-12-04T00:00:00","Maintenance":2432.23,"Structures":1252.97,"Avionics":737.04,"Inspection":1474.08,"Interiors":1474.08,"Engineering":0.0,"Cabinet":0,"Upholstery":0,"Finish":0.0},
+    {"number":"P7645","customer":"Kaiser","aircraftModel":"B737","scope":"Starlink","induction":"2025-11-30T00:00:00","delivery":"2025-12-10T00:00:00","Maintenance":93.57,"Structures":240.61,"Avionics":294.07,"Inspection":120.3,"Interiors":494.58,"Engineering":80.2,"Cabinet":0,"Upholstery":0,"Finish":13.37},
+    {"number":"P7426","customer":"Celestial","aircraftModel":"B757","scope":"Post Maintenance Discrepancies","induction":"2026-01-05T00:00:00","delivery":"2026-01-15T00:00:00","Maintenance":0.0,"Structures":0.0,"Avionics":0.0,"Inspection":0.0,"Interiors":0.0,"Engineering":0.0,"Cabinet":0,"Upholstery":0,"Finish":0.0},
+    {"number":"P7548","customer":"Ty Air","aircraftModel":"B737","scope":"CMS Issues","induction":"2025-10-20T00:00:00","delivery":"2025-10-30T00:00:00","Maintenance":0.0,"Structures":0.0,"Avionics":0.0,"Inspection":0.0,"Interiors":0.0,"Engineering":0.0,"Cabinet":0,"Upholstery":0,"Finish":0.0},
+    {"number":"P7706","customer":"Valkyrie","aircraftModel":"B737-MAX","scope":"Starlink, Mods","induction":"2025-10-31T00:00:00","delivery":"2025-11-25T00:00:00","Maintenance":123.3,"Structures":349.4,"Avionics":493.2,"Inspection":164.4,"Interiors":698.7,"Engineering":143.8,"Cabinet":61.6,"Upholstery":0,"Finish":20.6},
+    {"number":"P7685","customer":"Sands","aircraftModel":"B737-700","scope":"Starlink","induction":"2025-11-17T00:00:00","delivery":"2025-11-24T00:00:00","Maintenance":105.44,"Structures":224.1,"Avionics":303.14,"Inspection":118.62,"Interiors":474.48,"Engineering":79.08,"Cabinet":0,"Upholstery":0,"Finish":13.18},
+    {"number":"P7712","customer":"Ty Air","aircraftModel":"B737","scope":"Monthly and 6 Month Check","induction":"2025-11-04T00:00:00","delivery":"2025-12-21T00:00:00","Maintenance":893.0,"Structures":893.0,"Avionics":476.3,"Inspection":238.1,"Interiors":3453.0,"Engineering":0.0,"Cabinet":0,"Upholstery":0,"Finish":0.0},
+    {"number":"P7639/7711","customer":"Snap","aircraftModel":"B737","scope":"Starlink and MX Package","induction":"2025-12-01T00:00:00","delivery":"2025-12-15T00:00:00","Maintenance":132.1,"Structures":330.3,"Avionics":440.4,"Inspection":220.2,"Interiors":990.9,"Engineering":66.1,"Cabinet":0,"Upholstery":0,"Finish":22.0},
+]
+DEFAULT_POTENTIAL = [
+    {"number":"P7661","customer":"Sands","aircraftModel":"A340-500","scope":"C Check","induction":"2026-01-29T00:00:00","delivery":"2026-02-28T00:00:00","Maintenance":2629.44,"Structures":1709.14,"Avionics":723.1,"Inspection":1248.98,"Interiors":262.94,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
+    {"number":"P7669","customer":"Sands","aircraftModel":"A319-133","scope":"C Check","induction":"2025-12-08T00:00:00","delivery":"2026-01-28T00:00:00","Maintenance":2029.67,"Structures":984.08,"Avionics":535.55,"Inspection":675.56,"Interiors":1906.66,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
+    {"number":None,"customer":"Sands","aircraftModel":"B767-300","scope":"C Check","induction":"2026-09-15T00:00:00","delivery":"2026-12-04T00:00:00","Maintenance":0.0,"Structures":0.0,"Avionics":0.0,"Inspection":0.0,"Interiors":0.0,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
+    {"number":"P7686","customer":"Polaris","aircraftModel":"B777","scope":"1A & 3A Mx Checks","induction":"2025-12-01T00:00:00","delivery":"2025-12-09T00:00:00","Maintenance":643.15,"Structures":287.36,"Avionics":150.52,"Inspection":177.89,"Interiors":109.47,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
+    {"number":"P7430","customer":"Turkmen","aircraftModel":"B777","scope":"Maint/Recon/Refub","induction":"2025-11-10T00:00:00","delivery":"2026-07-13T00:00:00","Maintenance":12720.0,"Structures":12720.0,"Avionics":3180.0,"Inspection":3180.0,"Interiors":19080.0,"Engineering":3180,"Cabinet":3180,"Upholstery":3180,"Finish":3180},
+    {"number":"P7649","customer":"NEP","aircraftModel":"B767-300","scope":"Refurb","induction":"2026-02-02T00:00:00","delivery":"2026-07-13T00:00:00","Maintenance":2000.0,"Structures":2400.0,"Avionics":2800.0,"Inspection":800.0,"Interiors":4400.0,"Engineering":1800,"Cabinet":1600,"Upholstery":1200,"Finish":3000},
+    {"number":"P7689","customer":"Sands","aircraftModel":"B737-700","scope":"C1,C3,C6C7 Mx","induction":"2025-09-10T00:00:00","delivery":"2026-11-07T00:00:00","Maintenance":8097.77,"Structures":1124.69,"Avionics":899.75,"Inspection":787.28,"Interiors":337.14,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
+    {"number":"P7690","customer":"Sands","aircraftModel":None,"scope":"C1,C2,C7 Mx","induction":"2025-05-25T00:00:00","delivery":"2025-07-22T00:00:00","Maintenance":3227.14,"Structures":2189.85,"Avionics":922.04,"Inspection":1152.55,"Interiors":4033.92,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
+    {"number":"P7691","customer":"Sands","aircraftModel":"B737-700","scope":"C1,C2,C3,C7 Mx","induction":"2026-10-13T00:00:00","delivery":"2026-12-22T00:00:00","Maintenance":4038.3,"Structures":5115.18,"Avionics":1076.88,"Inspection":1346.1,"Interiors":1884.54,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
+]
+DEFAULT_ACTUAL = []
+DEFAULT_DEPTS = [
+    {"name":"Maintenance","headcount":36,"key":"Maintenance"},
+    {"name":"Structures","headcount":22,"key":"Structures"},
+    {"name":"Avionics","headcount":15,"key":"Avionics"},
+    {"name":"Inspection","headcount":10,"key":"Inspection"},
+    {"name":"Interiors","headcount":11,"key":"Interiors"},
+    {"name":"Engineering","headcount":7,"key":"Engineering"},
+    {"name":"Cabinet","headcount":3,"key":"Cabinet"},
+    {"name":"Upholstery","headcount":7,"key":"Upholstery"},
+    {"name":"Finish","headcount":6,"key":"Finish"},
+]
+
+# --------------------- SESSION STATE ---------------------
+if "projects" not in st.session_state:
+    st.session_state.projects = deepcopy(DEFAULT_PROJECTS)
+if "potential" not in st.session_state:
+    st.session_state.potential = deepcopy(DEFAULT_POTENTIAL)
+if "actual" not in st.session_state:
+    st.session_state.actual = deepcopy(DEFAULT_ACTUAL)
+if "depts" not in st.session_state:
+    st.session_state.depts = deepcopy(DEFAULT_DEPTS)
+
+def dept_keys():
+    return [d["key"] for d in st.session_state.depts]
+
+# --------------------- QUICK EDIT (sidebar) ---------------------
+st.sidebar.header("Quick Edit")
+dataset_choice = st.sidebar.selectbox("Dataset", ["Confirmed","Potential","Actual"])
+dataset_key = {"Confirmed":"projects","Potential":"potential","Actual":"actual"}[dataset_choice]
+current_list = st.session_state[dataset_key]
+project_ids = [f'{(p.get("number") or "—")} — {(p.get("customer") or "Unknown")}' for p in current_list]
+select_existing = st.sidebar.selectbox("Project", ["➕ New Project"] + project_ids)
+
+with st.sidebar.form("quick_edit"):
+    if select_existing == "➕ New Project":
+        number = st.text_input("Project Number", "PXXXX")
+        customer = st.text_input("Customer", "")
+        aircraft = st.text_input("Aircraft Model", "")
+        scope = st.text_input("Scope", "")
+        induction = st.date_input("Induction", date(2025, 11, 1)).isoformat()
+        delivery  = st.date_input("Delivery",  date(2025, 11, 8)).isoformat()
+        hours_inputs = {k: st.number_input(f"{k} hours", min_value=0.0, value=0.0, step=1.0) for k in dept_keys()}
+    else:
+        idx = project_ids.index(select_existing)
+        proj = deepcopy(current_list[idx])
+        number = st.text_input("Project Number", str(proj.get("number") or ""))
+        customer = st.text_input("Customer", str(proj.get("customer") or ""))
+        aircraft = st.text_input("Aircraft Model", str(proj.get("aircraftModel") or ""))
+        scope = st.text_input("Scope", str(proj.get("scope") or ""))
+        induction = st.date_input("Induction", date.fromisoformat(str(proj["induction"])[:10])).isoformat()
+        delivery  = st.date_input("Delivery",  date.fromisoformat(str(proj["delivery"])[:10])).isoformat()
+        hours_inputs = {k: st.number_input(f"{k} hours", min_value=0.0, value=float(proj.get(k, 0) or 0), step=1.0) for k in dept_keys()}
+
+    colA, colB = st.columns(2)
+    with colA:
+        apply_btn = st.form_submit_button("Apply Changes", use_container_width=True)
+    with colB:
+        reset_btn = st.form_submit_button("Reset to Defaults", use_container_width=True)
+
+if apply_btn:
+    entry = {"number": number.strip(), "customer": customer.strip(), "aircraftModel": aircraft.strip(),
+             "scope": scope.strip(), "induction": induction, "delivery": delivery}
+    for k in dept_keys(): entry[k] = float(hours_inputs[k] or 0.0)
+    if select_existing == "➕ New Project":
+        st.session_state[dataset_key].append(entry)
+    else:
+        st.session_state[dataset_key][idx] = entry
+    st.toast("Dataset updated", icon="✅")
+
+if reset_btn:
+    st.session_state.projects  = deepcopy(DEFAULT_PROJECTS)
+    st.session_state.potential = deepcopy(DEFAULT_POTENTIAL)
+    st.session_state.actual    = deepcopy(DEFAULT_ACTUAL)
+    st.session_state.depts     = deepcopy(DEFAULT_DEPTS)
+    st.toast("All datasets reset to defaults", icon="↩️")
+
+# --------------------- BULK EDIT ---------------------
+with st.expander("Bulk Edit: Confirmed / Potential / Actual", expanded=False):
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        df_proj = st.data_editor(pd.DataFrame(st.session_state.projects), key="ed_confirmed", height=300)
+        st.session_state.projects = df_proj.astype(object).to_dict(orient="records")
+    with c2:
+        df_pot = st.data_editor(pd.DataFrame(st.session_state.potential), key="ed_potential", height=300)
+        st.session_state.potential = df_pot.astype(object).to_dict(orient="records")
+    with c3:
+        df_act = st.data_editor(pd.DataFrame(st.session_state.actual), key="ed_actual", height=300)
+        st.session_state.actual = df_act.astype(object).to_dict(orient="records")
+
+with st.expander("Edit Department Headcounts", expanded=False):
+    df_depts = st.data_editor(pd.DataFrame(st.session_state.depts), key="ed_depts", height=240)
+    df_depts["headcount"] = pd.to_numeric(df_depts["headcount"], errors="coerce").fillna(0).astype(int)
+    st.session_state.depts = df_depts.to_dict(orient="records")
+
+st.markdown("---")
+
+# --------------------- POTENTIAL PROJECT FILTER (sidebar) ---------------------
+st.sidebar.header("Include Potential Projects")
+
+# Build stable keys even if a project has no number
+pot_keys = []
+label_by_key = {}
+for i, p in enumerate(st.session_state.potential):
+    key = p.get("number") or f"IDX{i}"  # fallback stable key for None numbers
+    label = f"{key} — {p.get('customer') or 'Unknown'} — {p.get('aircraftModel') or ''}"
+    pot_keys.append(key)
+    label_by_key[key] = label
+
+# Seed the stored selection (default = ALL)
+if "potential_include_keys" not in st.session_state:
+    st.session_state["potential_include_keys"] = pot_keys.copy()
+
+# Bulk actions
+col1, col2 = st.sidebar.columns(2)
+if col1.button("Select all", use_container_width=True):
+    for i, p in enumerate(st.session_state.potential):
+        cb_key = f"pot_ck_{p.get('number') or f'IDX{i}'}"
+        st.session_state[cb_key] = True
+    st.session_state["potential_include_keys"] = pot_keys.copy()
+    st.rerun()
+
+if col2.button("Clear all", use_container_width=True):
+    for i, p in enumerate(st.session_state.potential):
+        cb_key = f"pot_ck_{p.get('number') or f'IDX{i}'}"
+        st.session_state[cb_key] = False
+    st.session_state["potential_include_keys"] = []
+    st.rerun()
+
+# Individual checkboxes (the actual checklist)
+new_selected = []
+with st.sidebar.expander("Potential projects (check to include)", expanded=True):
+    default_set = set(st.session_state["potential_include_keys"])
+    for i, p in enumerate(st.session_state.potential):
+        key = p.get("number") or f"IDX{i}"
+        label = label_by_key[key]
+        cb_key = f"pot_ck_{key}"
+
+        # Use current per-checkbox state if present; otherwise seed from stored selection
+        default_checked = key in default_set
+        checked = st.checkbox(label, value=default_checked, key=cb_key)
+        if checked:
+            new_selected.append(key)
+
+# Persist the latest selection
+st.session_state["potential_include_keys"] = new_selected
+
+# Filter the potential list that will feed the HTML/JS app
+selected_set = set(new_selected)
+filtered_potential = [
+    p for i, p in enumerate(st.session_state.potential)
+    if (p.get("number") or f"IDX{i}") in selected_set
+]
+
+
+# --------------------- HTML/JS ---------------------
+html_template = """
 <!DOCTYPE html>
 <html>
 <head>
@@ -98,7 +268,7 @@ HTML_TEMPLATE = r"""
     .manual-panel input,
     .manual-panel select,
     .manual-hours input {
-      font-size: 13px;
+      font-size: 13px;          /* match impact-grid controls */
       line-height: 1.25;
       padding: 8px 10px;
       border: 1px solid #e5e7eb;
@@ -164,7 +334,17 @@ HTML_TEMPLATE = r"""
   <label for="disciplineSelect"><strong>Discipline:</strong></label>
   <select id="disciplineSelect"></select>
 
-  <label><input type="checkbox" id="showPotential" checked> Show Potential</label>
+  <label><input type="checkbox" id="showPotential"> Show Potential</label>
+  <details id="potFilter" class="chip">
+      <summary>Potential: <span id="potCount">All</span></summary>
+      <div id="potFilterList" style="max-height:220px;overflow:auto;margin-top:6px;"></div>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button id="potApply" type="button">Apply</button>
+        <button id="potAll"   type="button">All</button>
+        <button id="potNone"  type="button">None</button>
+      </div>
+  </details>
+
   <label><input type="checkbox" id="showActual"> Show Actual</label>
 
   <label><strong>Timeline:</strong>
@@ -272,7 +452,7 @@ HTML_TEMPLATE = r"""
   <summary>Snapshot Breakdown (Projects → Dept)</summary>
   <div class="snap-controls">
     <label><input type="checkbox" id="snapConfirmed" checked> Include Confirmed</label>
-    <label><input type="checkbox" id="snapPotential" checked> Include Potential</label>
+    <label><input type="checkbox" id="snapPotential"> Include Potential</label>
 
     <label>Top N projects
       <input type="range" id="snapTopN" min="3" max="20" step="1" value="8" style="vertical-align:middle;">
@@ -313,7 +493,7 @@ HTML_TEMPLATE = r"""
   <summary>Hangar Bay Planner (beta)</summary>
   <div class="hangar-wrap">
     <div class="hangar-controls">
-      <label><input type="checkbox" id="planIncludePotential" checked> Include Potential projects</label>
+      <label><input type="checkbox" id="planIncludePotential"> Include Potential projects</label>
       <label>Periods to show
         <input type="number" id="planPeriods" min="4" max="52" step="1" value="12" style="width:72px;">
       </label>
@@ -344,6 +524,10 @@ HTML_TEMPLATE = r"""
 // ---- LIVE DATA ----
 const projects = __PROJECTS__;
 const potentialProjects = __POTENTIAL__;
+
+// Start with all potential projects active
+let potentialActive = potentialProjects.slice();
+
 const projectsActual = __ACTUAL__;
 const departmentCapacities = __DEPTS__;
 
@@ -440,6 +624,14 @@ function computeMonthlyLoadsActual(arr, key, monthLabels){
   }
   return {series:total, breakdown};
 }
+function rebuildPotentialDataFromActive(){
+  departmentCapacities.forEach(d=>{
+    const w = computeWeeklyLoadsDetailed(potentialActive, d.key, weekLabels);
+    const m = computeMonthlyLoadsDetailed(potentialActive, d.key, monthLabels);
+    dataWPotential[d.key] = { name: d.name, series: w.series, breakdown: w.breakdown };
+    dataMPotential[d.key] = { name: d.name, series: m.series, breakdown: m.breakdown };
+  });
+}
 
 // -------------------- Data Maps --------------------
 const weekLabels = getWeekList();
@@ -473,6 +665,7 @@ const prodSlider = document.getElementById('prodFactor');
 const prodVal = document.getElementById('prodVal');
 const hoursInput = document.getElementById('hoursPerFTE');
 const chkPot = document.getElementById('showPotential');
+chkPot.checked = false;
 const chkAct = document.getElementById('showActual');
 const periodSel = document.getElementById('periodSel');
 const utilSepChk = document.getElementById('utilSeparate');
@@ -508,7 +701,7 @@ const annos = { annotations:{ todayLine:{ type:'line', xMin: weekTodayLabel, xMa
 const ctx = document.getElementById('myChart').getContext('2d');
 let currentKey = sel.value;
 let currentPeriod = 'weekly';
-let showPotential = true;
+let showPotential = false;
 let showActual = false;
 let utilSeparate = true;
 let utilChart = null;
@@ -811,7 +1004,7 @@ function renderImpactResult(obj){
     <div><strong>Requested delivery:</strong> ${dfmt(targetEnd)}</div>
     <div><strong>New delivery (what-if):</strong> ${dfmt(newEnd)} <em>${slipDays>0?`(+${slipDays} workdays)`:''}</em></div>
     <table class="impact-table">
-      <thead><tr><th>Department</th><th>Proj Hours</th><th>Headroom</th><th>Shortfall</th><th>Slip (wd)</th></tr></thead>
+      <thead><tr><th>Department</th><th>Proj Hours</th><th>Available Manpower (Hrs.)</th><th>Shortfall</th><th>Slip (wd)</th></tr></thead>
       <tbody>
         ${rows.map(r=>`<tr>
           <td>${r.name}</td>
@@ -863,6 +1056,7 @@ let sankeyE=null, treemapE=null, paretoChart=null;
 const snapConfirmed=document.getElementById('snapConfirmed');
 const snapPotential=document.getElementById('snapPotential');
 const snapTopN=document.getElementById('snapTopN');
+snapPotential.checked = false;
 const snapTopNVal=document.getElementById('snapTopNVal');
 snapConfirmed.addEventListener('change', rebuildSnapshot);
 snapPotential.addEventListener('change', rebuildSnapshot);
@@ -892,11 +1086,19 @@ function clampDateToLabels(d){
 function syncSnapshotRangeToLabels({force=false} = {}){
   const {min, max} = labelsMinMaxDates();
   if (!min || !max) return;
-  if (force || !snapFrom.value) snapFrom.value = fmtDateInput(min);
+
+  // Default the "From" to the current period that contains today
+  const today = new Date();
+  const preferFrom = (currentPeriod==='weekly') ? mondayOf(today) : firstOfMonth(today);
+
+  if (force || !snapFrom.value) snapFrom.value = fmtDateInput(clampDateToLabels(preferFrom));
   if (force || !snapTo.value)   snapTo.value   = fmtDateInput(max);
+
+  // Re-clamp in case user changed periods
   snapFrom.value = fmtDateInput(clampDateToLabels(parseDateLocalISO(snapFrom.value)));
   snapTo.value   = fmtDateInput(clampDateToLabels(parseDateLocalISO(snapTo.value)));
 }
+
 snapFrom.addEventListener('change', ()=>{
   const f = parseDateLocalISO(snapFrom.value);
   const t = parseDateLocalISO(snapTo.value);
@@ -1080,7 +1282,7 @@ function rebuildSnapshot(){
         data: groups,
         label:{ show:true, formatter:(p)=>{
           const v=+p.value||0; const pct= total>0 ? Math.round(v/total*100) : 0;
-          return `${p.name}\n${v.toFixed(0)} hrs • ${pct}%`;
+          return `${p.name}\\n${v.toFixed(0)} hrs • ${pct}%`;
         }}
       }]
     });
@@ -1164,19 +1366,25 @@ const planPeriods = document.getElementById('planPeriods');
 const planFrom = document.getElementById('planFrom');
 const hangarGrid = document.getElementById('hangarGrid');
 
+planIncPot.checked = false;
+
 function setPlannerDefaultDates(){
   const labels = currentLabels();
   if (!labels.length) return;
-  const first = parseDateLocalISO(labels[0]);
-  const today = new Date();
-  // default to the first label >= today, else the first label
-  let start = first;
-  for (const lbl of labels){
-    const d = parseDateLocalISO(lbl);
-    if (d >= today) { start = d; break; }
-  }
-  planFrom.value = fmtDateInput(start);
+
+  // Sunday before (or equal to) today
+  const t = new Date();
+  const sunday = new Date(t.getFullYear(), t.getMonth(), t.getDate() - t.getDay()); // getDay(): Sun=0
+
+  // Clamp to labels range so the value is always valid
+  const {min, max} = labelsMinMaxDates();
+  let v = sunday;
+  if (min && v < min) v = min;
+  if (max && v > max) v = max;
+
+  planFrom.value = fmtDateInput(v);
 }
+
 setPlannerDefaultDates();
 
 function modelShort(m){
@@ -1231,7 +1439,7 @@ function activeProjectsForIdx(i, includePotential){
     }
   }
   pull(projects);
-  if (includePotential) pull(potentialProjects);
+  if (includePotential) pull(potentialActive);
   return arr;
 }
 
@@ -1336,8 +1544,12 @@ function assignForPeriod(aircraftList, periodIndex){
     if(!pushSmallIntoAnySingle(p)){ conflicts.push(p); }
   }
 
-  // Render cell objects
-  function bayCell(bay){
+  // ---------------- Return the assignments to the caller ----------------
+return { H, D, conflicts };
+} // ✅ closes assignForPeriod(…)
+
+// Render cell objects (top-level, used by buildPlannerGrid)
+function bayCell(bay){
   const label = (p)=> `${p.number || '—'} — ${p.customer || 'Unknown'}`;
   const tip   = (p)=> p.model || (p.short || ''); // tooltip shows aircraft type
 
@@ -1357,6 +1569,7 @@ function assignForPeriod(aircraftList, periodIndex){
 }
 
 
+
 function buildPlannerGrid(indices){
   // Build header + 6 rows: H1, H2, D1, D2, D3, Conflicts
   const cols = indices.length + 1; // +1 for row header
@@ -1373,7 +1586,7 @@ function buildPlannerGrid(indices){
     html += `<div class="hcell rowhdr">${title}</div>`;
     for(const i of indices){
       const cell = getter(i);
-      const tip = (cell.tips && cell.tips.length) ? `title="${cell.tips.join(' \n ')}"` : '';
+      const tip = (cell.tips && cell.tips.length) ? `title="${cell.tips.join(' \\n ')}"` : '';
       html += `<div class="hcell ${cell.cls}" ${tip}>${cell.text}</div>`;
     }
   }
@@ -1385,11 +1598,12 @@ function buildPlannerGrid(indices){
     return assignForPeriod(act, i);
   });
 
-  row('Hangar H — Bay 1', (i)=> assigned[indices.indexOf(i)].H[0]);
-  row('Hangar H — Bay 2', (i)=> assigned[indices.indexOf(i)].H[1]);
-  row('Hangar D — Bay 1', (i)=> assigned[indices.indexOf(i)].D[0]);
-  row('Hangar D — Bay 2', (i)=> assigned[indices.indexOf(i)].D[1]);
-  row('Hangar D — Bay 3', (i)=> assigned[indices.indexOf(i)].D[2]);
+  row('Hangar H — Bay 1', (i)=> bayCell(assigned[indices.indexOf(i)].H[0]));
+  row('Hangar H — Bay 2', (i)=> bayCell(assigned[indices.indexOf(i)].H[1]));
+  row('Hangar D — Bay 1', (i)=> bayCell(assigned[indices.indexOf(i)].D[0]));
+  row('Hangar D — Bay 2', (i)=> bayCell(assigned[indices.indexOf(i)].D[1]));
+  row('Hangar D — Bay 3', (i)=> bayCell(assigned[indices.indexOf(i)].D[2]));
+
 
   // Conflicts row: red cell if any conflicts
   html += `<div class="hcell rowhdr">Conflicts</div>`;
@@ -1444,6 +1658,56 @@ hoursInput.addEventListener('change', e=>{ const v=parseInt(e.target.value||'40'
 periodSel.addEventListener('change', e=>{ currentPeriod=e.target.value; refreshDatasets(); });
 utilSepChk.addEventListener('change', e=>{ utilSeparate=e.target.checked; rebuildUtilChart(); });
 
+// ---- Potential Filter UI (popover) ----
+const potFilterList = document.getElementById('potFilterList');
+const potCountEl    = document.getElementById('potCount');
+
+const potKeys = potentialProjects.map((p, i)=> (p.number ?? `IDX${i}`));
+let selectedPot = new Set(potKeys); // default = all selected
+
+function updatePotCount(){
+  const n = selectedPot.size, total = potKeys.length;
+  potCountEl.textContent = (n===total) ? 'All' : (n===0 ? 'None' : `${n}/${total}`);
+}
+
+function renderPotList(){
+  potFilterList.innerHTML = '';
+  potentialProjects.forEach((p, i)=>{
+    const key   = potKeys[i];
+    const cbId  = `pot_ck_${i}`;
+    const label = `${key} — ${(p.customer||'Unknown')} — ${(p.aircraftModel||'')}`;
+    potFilterList.insertAdjacentHTML('beforeend', `
+      <label style="display:flex;gap:8px;align-items:center;margin:4px 0;">
+        <input type="checkbox" id="${cbId}" ${selectedPot.has(key)?'checked':''}>
+        <span>${label}</span>
+      </label>
+    `);
+    document.getElementById(cbId).addEventListener('change', (e)=>{
+      if (e.target.checked) selectedPot.add(key); else selectedPot.delete(key);
+      updatePotCount();
+    });
+  });
+  updatePotCount();
+}
+
+document.getElementById('potAll').addEventListener('click', ()=>{
+  selectedPot = new Set(potKeys);
+  renderPotList();
+});
+document.getElementById('potNone').addEventListener('click', ()=>{
+  selectedPot = new Set();
+  renderPotList();
+});
+document.getElementById('potApply').addEventListener('click', ()=>{
+  potentialActive = potentialProjects.filter((p, i)=> selectedPot.has(potKeys[i]));
+  rebuildPotentialDataFromActive();
+  refreshDatasets();        // updates main chart, KPIs, snapshot, and planner
+});
+
+// Build UI once
+renderPotList();
+
+
 // ---------- Initial render ----------
 refreshDatasets();
 rebuildUtilChart();
@@ -1453,250 +1717,13 @@ rebuildPlanner();
 </html>
 """
 
-# -----------------------------------
-# Backend: seed DB if empty
-# -----------------------------------
-ds.seed_if_empty()  # seeds departments on first run; projects remain whatever is in DB
+# Inject live data
+html_code = (
+    html_template
+      .replace("__PROJECTS__", json.dumps(st.session_state.projects))
+      .replace("__POTENTIAL__", json.dumps(filtered_potential))
+      .replace("__ACTUAL__", json.dumps(st.session_state.actual))
+      .replace("__DEPTS__", json.dumps(st.session_state.depts))
+)
 
-def dept_keys():
-    return [d["key"] for d in ds.list_departments()]
-
-# -----------------------------------
-# Sidebar navigation
-# -----------------------------------
-st.sidebar.header("Navigation")
-view = st.sidebar.radio("Go to", ["Dashboard", "Admin / Manage Data"], index=0)
-
-# ======================================================================
-#                              ADMIN VIEW
-# ======================================================================
-if view == "Admin / Manage Data":
-    st.title("Admin / Manage Data")
-
-    tabs = st.tabs(["📄 Projects (CRUD)", "📤 Bulk Import", "👥 Departments"])
-
-    # ---- Projects CRUD ----
-    with tabs[0]:
-        st.subheader("Projects (Confirmed / Potential / Actual)")
-
-        category = st.selectbox("Category", ["confirmed", "potential", "actual"], index=0)
-        rows = ds.list_projects(category)
-
-        def label_for(p):
-            pn = p.get("number") or "—"
-            cust = p.get("customer") or "Unknown"
-            return f'{pn} — {cust} (id:{p["id"]})'
-
-        choices = ["➕ New Project"] + [label_for(p) for p in rows]
-        pick = st.selectbox("Select", choices, index=0)
-
-        dkeys = dept_keys()
-
-        if pick == "➕ New Project":
-            proj = {"number":"PXXXX","customer":"","aircraftModel":"","scope":"",
-                    "induction":None,"delivery":None, **{k:0.0 for k in dkeys}}
-            proj_id = None
-        else:
-            idx = choices.index(pick) - 1
-            proj = deepcopy(rows[idx])
-            proj_id = proj["id"]
-
-        with st.form("proj_form"):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                number   = st.text_input("Project Number", value=str(proj.get("number") or ""))
-                customer = st.text_input("Customer", value=str(proj.get("customer") or ""))
-                aircraft = st.text_input("Aircraft Model", value=str(proj.get("aircraftModel") or ""))
-            with c2:
-                scope    = st.text_input("Scope", value=str(proj.get("scope") or ""))
-                ind_date = st.date_input(
-                    "Induction",
-                    value=(
-                        date.fromisoformat(str(proj["induction"])[:10])
-                        if proj.get("induction") else date.today()
-                    ),
-                )
-            with c3:
-                del_date = st.date_input(
-                    "Delivery",
-                    value=(
-                        date.fromisoformat(str(proj["delivery"])[:10])
-                        if proj.get("delivery") else date.today()
-                    ),
-                )
-                st.caption("Dates are stored as YYYY-MM-DD.")
-
-            st.markdown("**Department Hours**")
-            cols = st.columns(3)
-            hours_inputs = {}
-            for i, k in enumerate(dkeys):
-                with cols[i % 3]:
-                    hours_inputs[k] = st.number_input(
-                        f"{k} hours",
-                        min_value=0.0,
-                        value=float(proj.get(k, 0.0) or 0.0),
-                        step=1.0,
-                    )
-
-            b1, b2, b3 = st.columns([1,1,1])
-            with b1:
-                save_btn = st.form_submit_button("💾 Save / Update", use_container_width=True)
-            with b2:
-                del_btn = st.form_submit_button("🗑️ Delete", use_container_width=True) if proj_id is not None else None
-            with b3:
-                refresh_btn = st.form_submit_button("🔄 Refresh List", use_container_width=True)
-
-        if save_btn:
-            payload = {
-                "number": number.strip() or None,
-                "customer": customer.strip() or None,
-                "aircraftModel": aircraft.strip() or None,
-                "scope": scope.strip() or None,
-                "induction": ind_date.isoformat(),
-                "delivery": del_date.isoformat(),
-                "category": category,
-            }
-            for k in dkeys:
-                payload[k] = float(hours_inputs[k] or 0.0)
-
-            if proj_id is None:
-                created = ds.create_project(payload, category=category)
-                st.success(f"Created project id {created['id']} in {category}.")
-            else:
-                updated = ds.update_project(proj_id, payload)
-                st.success(f"Updated project id {updated['id']} in {updated['category']}.")
-
-            st.rerun()
-
-        if del_btn and proj_id is not None:
-            ds.delete_project(proj_id)
-            st.warning(f"Deleted project id {proj_id}.")
-            st.rerun()
-
-        if refresh_btn:
-            st.rerun()
-
-        st.markdown("---")
-        st.write(f"**{category.capitalize()} projects**")
-        if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("No projects in this category yet.")
-
-    # ---- Bulk Import ----
-    with tabs[1]:
-        st.subheader("Bulk Import CSV/XLSX → Projects")
-        st.caption(
-            "Columns accepted: number, customer, aircraftModel, scope, induction, delivery, "
-            "and dept-hour columns (Maintenance, Structures, Avionics, Inspection, Interiors, Engineering, Cabinet, Upholstery, Finish)."
-        )
-        import_cat = st.radio("Import into category", ["confirmed", "potential", "actual"], horizontal=True)
-        up = st.file_uploader("Upload CSV/XLSX", type=["csv", "xlsx", "xls"])
-        if up and st.button("Import"):
-            try:
-                result = ds.bulk_import_projects(up, category=import_cat)
-                st.success(f"Imported {result['imported']} rows. Error rows: {result['errors']}")
-            except Exception as e:
-                st.error(f"Import failed: {e}")
-
-    # ---- Departments ----
-    with tabs[2]:
-        st.subheader("Department Headcounts")
-        depts = ds.list_departments()
-        df = pd.DataFrame(depts)
-        new = st.data_editor(
-            df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={"key": st.column_config.TextColumn(disabled=True)},
-        )
-        if st.button("Save Headcounts"):
-            new["headcount"] = pd.to_numeric(new["headcount"], errors="coerce").fillna(0).astype(int)
-            saved = ds.upsert_departments(new.to_dict(orient="records"))
-            st.success("Departments saved.")
-            st.dataframe(pd.DataFrame(saved), use_container_width=True, hide_index=True)
-
-# ======================================================================
-#                             DASHBOARD VIEW
-# ======================================================================
-else:
-    st.title("Capacity & Load Dashboard")
-
-    # Pull live datasets
-    #data = ds.get_all_datasets()
-    #confirmed = data["projects"]
-    #potential_all = data["potential"]
-    #actual = data["actual"]
-    #depts = data["depts"]
-
-    confirmed, potential, actual, depts = ds.get_all_datasets()
-
-    # If departments were cleared at some point, repopulate and reload
-    if not depts:
-        default_depts = [
-            {"key":"Maintenance","name":"Maintenance","headcount":36},
-            {"key":"Structures","name":"Structures","headcount":22},
-            {"key":"Avionics","name":"Avionics","headcount":15},
-            {"key":"Inspection","name":"Inspection","headcount":10},
-            {"key":"Interiors","name":"Interiors","headcount":11},
-            {"key":"Engineering","name":"Engineering","headcount":7},
-            {"key":"Cabinet","name":"Cabinet","headcount":3},
-            {"key":"Upholstery","name":"Upholstery","headcount":7},
-            {"key":"Finish","name":"Finish","headcount":6},
-        ]
-        for d in default_depts:
-            ds.upsert_department(d["key"], d["name"], d["headcount"])
-        depts = ds.list_departments()
-
-
-    potential_all = potential or []
-
-    # Server-side filter: choose which potential projects to include
-    st.subheader("Filters (Server-side)")
-    if potential_all:
-        pot_labels = [f'{p.get("number") or "—"} — {p.get("customer") or "Unknown"}' for p in potential_all]
-        selected = st.multiselect(
-            "Include only these Potential projects (leave empty = include all):",
-            pot_labels,
-            default=[],
-        )
-        if selected:
-            selected_numbers = set((lbl.split(" — ", 1)[0] or "").strip() for lbl in selected)
-            potential = [p for p in potential_all if (p.get("number") or "") in selected_numbers]
-        else:
-            potential = potential_all
-    else:
-        st.info("No Potential projects in DB.")
-        potential = []
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        if st.button("🔄 Refresh data"):
-            st.rerun()
-    with c2:
-        snapshot = {"projects": confirmed, "potential": potential, "actual": actual, "depts": depts}
-        st.download_button(
-            "⬇️ Download snapshot (JSON)",
-            data=json.dumps(snapshot, indent=2),
-            file_name="capacity_snapshot.json",
-            mime="application/json",
-        )
-    with c3:
-        st.caption("All charts below are fed by data from your database.")
-
-    # Inject live data into HTML, and flip default checkboxes for Potential to OFF
-    def inject(html: str) -> str:
-        code = (
-            html.replace("__PROJECTS__", json.dumps(confirmed))
-                .replace("__POTENTIAL__", json.dumps(potential))
-                .replace("__ACTUAL__", json.dumps(actual))
-                .replace("__DEPTS__", json.dumps(depts))
-        )
-        # Keep template intact; just flip default-checked to unchecked at render-time
-        code = code.replace('id="showPotential" checked', 'id="showPotential"')
-        code = code.replace('id="snapPotential" checked', 'id="snapPotential"')
-        code = code.replace('id="planIncludePotential" checked', 'id="planIncludePotential"')
-        return code
-
-    html_code = inject(HTML_TEMPLATE)
-    components.html(html_code, height=2600, scrolling=False)
+components.html(html_code, height=3000, scrolling=False)
