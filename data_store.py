@@ -1,420 +1,320 @@
 # data_store.py
-"""
-Lightweight persistence layer for the Capacity/Load app.
-
-- Defaults to local SQLite file: ./capacity.db
-- Optional hosted DB: set DB_URL (and optionally DB_TOKEN) in env or Streamlit secrets.toml
-    .streamlit/secrets.toml
-    -----------------------
-    DB_URL = "postgresql+psycopg2://USER:PASS@HOST:PORT/DBNAME"
-    # DB_TOKEN = "..."  (if your driver needs it; not used for SQLite/Postgres)
-
-Tables
-------
-Project:
-  id, number, customer, aircraft_model, scope, induction (date), delivery (date),
-  category ('confirmed' | 'potential' | 'actual'),
-  hours by department: maintenance, structures, avionics, inspection,
-  interiors, engineering, cabinet, upholstery, finish
-
-Department:
-  id, key, name, headcount (int)
-
-Public API (all return/accept plain dicts/lists)
-------------------------------------------------
-init_db()
-seed_if_empty(projects=None, potential=None, actual=None, depts=None)
-
-list_projects(category: str|None=None) -> list[dict]
-get_project(project_id: int) -> dict|None
-create_project(data: dict, category: str='confirmed') -> dict
-update_project(project_id: int, data: dict) -> dict
-delete_project(project_id: int) -> None
-
-list_departments() -> list[dict]
-upsert_departments(rows: list[dict]) -> list[dict]
-
-bulk_import_projects(file_path_or_buffer, category: str) -> dict  # uses pandas (csv/xlsx)
-
-get_all_datasets() -> dict  # {"projects": [...], "potential":[...], "actual":[...], "depts":[...]}
-
-Notes
------
-- Date fields accept 'YYYY-MM-DD' (preferred) or ISO strings; they are stored as DATE.
-- Returned date fields are 'YYYY-MM-DD' strings.
-- Field names in dicts match your Streamlit app:
-    number, customer, aircraftModel, scope, induction, delivery, and dept keys:
-    "Maintenance","Structures","Avionics","Inspection","Interiors",
-    "Engineering","Cabinet","Upholstery","Finish"
-"""
+# Lightweight SQLite-backed datastore for the Capacity app.
+# - Uses COUNT(*) (no references to departments.id)
+# - Stores projects as JSON payloads keyed by (dataset, number)
+# - Departments keyed by 'key' (e.g., "Maintenance"), no autoincrement id
 
 from __future__ import annotations
+import json
+import sqlite3
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple
 
-import os
-from datetime import date, datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+DB_PATH = Path(__file__).with_name("capacity.db")
 
-# SQLAlchemy
-from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, Date, select, func
-)
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
-# Optional: read Streamlit secrets if available
-def _read_secrets(key: str, default: Optional[str] = None) -> Optional[str]:
+# -----------------------------
+# Connection helpers
+# -----------------------------
+def _conn() -> sqlite3.Connection:
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _exec(con: sqlite3.Connection, sql: str, params: Tuple = ()) -> None:
+    con.execute(sql, params)
+
+
+def _fetchall(con: sqlite3.Connection, sql: str, params: Tuple = ()) -> List[sqlite3.Row]:
+    cur = con.execute(sql, params)
+    return cur.fetchall()
+
+
+# -----------------------------
+# Schema & Seeding
+# -----------------------------
+def ensure_schema() -> None:
+    con = _conn()
     try:
-        import streamlit as st  # type: ignore
-        return st.secrets.get(key, default)
-    except Exception:
-        return os.environ.get(key, default)
+        # For better concurrency if needed
+        con.execute("PRAGMA journal_mode=WAL;")
+        con.execute("PRAGMA foreign_keys=ON;")
 
-Base = declarative_base()
+        # Departments: key is the primary identifier
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS departments (
+                key TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                headcount INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
 
-# ------------------------- Models -------------------------
-class Project(Base):
-    __tablename__ = "projects"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    number = Column(String(64), nullable=True)
-    customer = Column(String(128), nullable=True)
-    aircraft_model = Column(String(64), nullable=True)
-    scope = Column(String(256), nullable=True)
-    induction = Column(Date, nullable=True)
-    delivery = Column(Date, nullable=True)
-    category = Column(String(16), nullable=False, default="confirmed")  # confirmed|potential|actual
-
-    # Hours by department
-    maintenance = Column(Float, default=0.0)
-    structures  = Column(Float, default=0.0)
-    avionics    = Column(Float, default=0.0)
-    inspection  = Column(Float, default=0.0)
-    interiors   = Column(Float, default=0.0)
-    engineering = Column(Float, default=0.0)
-    cabinet     = Column(Float, default=0.0)
-    upholstery  = Column(Float, default=0.0)
-    finish      = Column(Float, default=0.0)
-
-
-class Department(Base):
-    __tablename__ = "departments"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    key = Column(String(64), unique=True, nullable=False)   # e.g., "Maintenance"
-    name = Column(String(128), nullable=False)              # display name
-    headcount = Column(Integer, default=0)
+        # Projects table: store entire project dict as JSON payload,
+        # partitioned by dataset: 'confirmed' | 'potential' | 'actual'
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS projects (
+                dataset TEXT NOT NULL,
+                number  TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY (dataset, number)
+            );
+            """
+        )
+        con.commit()
+    finally:
+        con.close()
 
 
-# ------------------------- Engine & Session -------------------------
-def _resolve_db_url() -> str:
-    url = _read_secrets("DB_URL")
-    if url:
-        return url  # e.g., postgresql+psycopg2://... or sqlite:///...
-    # default to local SQLite (works on Streamlit Cloud but is ephemeral)
-    return "sqlite:///capacity.db"
-
-_ENGINE = create_engine(_resolve_db_url(), future=True)  # autocommit=False by default
-_SessionLocal = sessionmaker(bind=_ENGINE, expire_on_commit=False, class_=Session)
-
-def init_db() -> None:
-    Base.metadata.create_all(_ENGINE)
-
-# ------------------------- Helpers -------------------------
-DEPT_KEYS = [
-    "Maintenance","Structures","Avionics","Inspection",
-    "Interiors","Engineering","Cabinet","Upholstery","Finish"
-]
-
-def _to_date(v: Any) -> Optional[date]:
-    if v in (None, "", "NaT", "nan"):
-        return None
-    if isinstance(v, date):
-        return v
-    if isinstance(v, datetime):
-        return v.date()
-    s = str(v).strip()
-    # Accept 'YYYY-MM-DD' or full ISO
+def seed_if_empty() -> None:
+    """
+    Ensure default departments exist. Uses COUNT(*) to check for emptiness.
+    """
+    con = _conn()
     try:
-        if "T" in s:
-            return datetime.fromisoformat(s.replace("Z","")).date()
-        return datetime.strptime(s, "%Y-%m-%d").date()
-    except Exception:
-        # Try broader ISO parse
-        try:
-            return datetime.fromisoformat(s).date()
-        except Exception:
-            return None
+        # ✅ Use COUNT(*) — do NOT reference departments.id
+        n = con.execute("SELECT COUNT(*) FROM departments").fetchone()[0] or 0
+        if n == 0:
+            con.executemany(
+                "INSERT OR IGNORE INTO departments (key, name, headcount) VALUES (?,?,?)",
+                [
+                    ("Maintenance", "Maintenance", 12),
+                    ("Structures", "Structures", 8),
+                    ("Avionics", "Avionics", 6),
+                    ("Inspection", "Inspection", 5),
+                    ("Interiors", "Interiors", 10),
+                    ("Engineering", "Engineering", 7),
+                    ("Cabinet", "Cabinet", 6),
+                    ("Upholstery", "Upholstery", 6),
+                    ("Finish", "Finish", 6),
+                ],
+            )
+            con.commit()
+    finally:
+        con.close()
 
-def _float_or_zero(v: Any) -> float:
-    try:
-        if v is None or v == "":
-            return 0.0
-        return float(v)
-    except Exception:
-        return 0.0
 
-def _project_to_dict(p: Project) -> Dict[str, Any]:
-    # Keep the app’s original field names/casing
-    return {
-        "id": p.id,
-        "number": p.number,
-        "customer": p.customer,
-        "aircraftModel": p.aircraft_model,
-        "scope": p.scope,
-        "induction": p.induction.isoformat() if p.induction else None,
-        "delivery":  p.delivery.isoformat()  if p.delivery  else None,
-        # Hours by dept
-        "Maintenance": p.maintenance or 0.0,
-        "Structures":  p.structures  or 0.0,
-        "Avionics":    p.avionics    or 0.0,
-        "Inspection":  p.inspection  or 0.0,
-        "Interiors":   p.interiors   or 0.0,
-        "Engineering": p.engineering or 0.0,
-        "Cabinet":     p.cabinet     or 0.0,
-        "Upholstery":  p.upholstery  or 0.0,
-        "Finish":      p.finish      or 0.0,
-        "category":    p.category,
-    }
-
-def _dict_to_project_fields(data: Dict[str, Any]) -> Dict[str, Any]:
-    # Map incoming dict to model columns (normalize keys)
-    return {
-        "number": data.get("number"),
-        "customer": data.get("customer"),
-        "aircraft_model": data.get("aircraftModel") or data.get("aircraft_model"),
-        "scope": data.get("scope"),
-        "induction": _to_date(data.get("induction")),
-        "delivery":  _to_date(data.get("delivery")),
-        "maintenance": _float_or_zero(data.get("Maintenance")),
-        "structures":  _float_or_zero(data.get("Structures")),
-        "avionics":    _float_or_zero(data.get("Avionics")),
-        "inspection":  _float_or_zero(data.get("Inspection")),
-        "interiors":   _float_or_zero(data.get("Interiors")),
-        "engineering": _float_or_zero(data.get("Engineering")),
-        "cabinet":     _float_or_zero(data.get("Cabinet")),
-        "upholstery":  _float_or_zero(data.get("Upholstery")),
-        "finish":      _float_or_zero(data.get("Finish")),
-    }
-
-# ------------------------- Project CRUD -------------------------
-def list_projects(category: Optional[str] = None) -> List[Dict[str, Any]]:
-    init_db()
-    with _SessionLocal() as db:
-        stmt = select(Project)
-        if category:
-            stmt = stmt.where(Project.category == category)
-        stmt = stmt.order_by(Project.induction.nulls_last())
-        rows = db.execute(stmt).scalars().all()
-        return [_project_to_dict(p) for p in rows]
-
-def get_project(project_id: int) -> Optional[Dict[str, Any]]:
-    init_db()
-    with _SessionLocal() as db:
-        p = db.get(Project, project_id)
-        return _project_to_dict(p) if p else None
-
-def create_project(data: Dict[str, Any], category: str = "confirmed") -> Dict[str, Any]:
-    init_db()
-    fields = _dict_to_project_fields(data)
-    cat = (data.get("category") or category or "confirmed").lower()
-    if cat not in ("confirmed","potential","actual"):
-        cat = "confirmed"
-    with _SessionLocal() as db:
-        p = Project(category=cat, **fields)
-        db.add(p)
-        db.commit()
-        db.refresh(p)
-        return _project_to_dict(p)
-
-def update_project(project_id: int, data: Dict[str, Any]) -> Dict[str, Any]:
-    init_db()
-    with _SessionLocal() as db:
-        p: Project | None = db.get(Project, project_id)
-        if not p:
-            raise ValueError(f"Project id {project_id} not found")
-        fields = _dict_to_project_fields(data)
-        for k, v in fields.items():
-            setattr(p, k, v)
-        if "category" in data and data["category"]:
-            cat = str(data["category"]).lower()
-            if cat in ("confirmed","potential","actual"):
-                p.category = cat
-        db.commit()
-        db.refresh(p)
-        return _project_to_dict(p)
-
-def delete_project(project_id: int) -> None:
-    init_db()
-    with _SessionLocal() as db:
-        p = db.get(Project, project_id)
-        if p:
-            db.delete(p)
-            db.commit()
-
-# ------------------------- Departments -------------------------
+# -----------------------------
+# Department CRUD
+# -----------------------------
 def list_departments() -> List[Dict[str, Any]]:
-    init_db()
-    with _SessionLocal() as db:
-        rows = db.execute(select(Department).order_by(Department.id)).scalars().all()
-        return [{"id": d.id, "key": d.key, "name": d.name, "headcount": d.headcount} for d in rows]
-
-def upsert_departments(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Upsert by 'key'. If a row has an 'id' that doesn't match, 'key' wins.
-    """
-    init_db()
-    rows = rows or []
-    with _SessionLocal() as db:
-        existing_by_key = {d.key: d for d in db.execute(select(Department)).scalars().all()}
-        result = []
-        for r in rows:
-            key = (r.get("key") or r.get("name") or "").strip() or "Unknown"
-            name = r.get("name") or key
-            headcount = int(r.get("headcount") or 0)
-            d = existing_by_key.get(key)
-            if d:
-                d.name = name
-                d.headcount = headcount
-            else:
-                d = Department(key=key, name=name, headcount=headcount)
-                db.add(d)
-            result.append({"key": key, "name": name, "headcount": headcount})
-        db.commit()
-    return list_departments()
-
-# ------------------------- Bulk Import -------------------------
-def bulk_import_projects(file_path_or_buffer: Any, category: str) -> Dict[str, Any]:
-    """
-    Import projects from CSV/XLSX with columns:
-    number, customer, aircraftModel, scope, induction, delivery, and the DEPT_KEYS.
-    Extra columns are ignored. Missing dept columns default to 0.
-
-    Returns: {"imported": N, "errors": [row_index,...]}
-    """
-    import pandas as pd
-
-    cat = (category or "confirmed").lower()
-    if cat not in ("confirmed","potential","actual"):
-        cat = "confirmed"
-
-    df = None
+    con = _conn()
     try:
-        df = pd.read_excel(file_path_or_buffer)
-    except Exception:
-        try:
-            df = pd.read_csv(file_path_or_buffer)
-        except Exception as e:
-            raise ValueError(f"Could not read file as Excel or CSV: {e}")
+        rows = _fetchall(con, "SELECT key, name, headcount FROM departments ORDER BY name ASC;")
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
 
-    # Normalize columns -> exact expected names
-    colmap = {c.lower().strip(): c for c in df.columns}
-    def get_col(name: str) -> Optional[str]:
-        # accept camel or snake or common variants
-        candidates = {
-            "number": ["number","project","project number","proj","p#","p-number"],
-            "customer": ["customer","client","owner"],
-            "aircraftModel": ["aircraftmodel","aircraft","model","aircraft_model"],
-            "scope": ["scope","work scope","description"],
-            "induction": ["induction","start","start_date","induct","induction_date"],
-            "delivery": ["delivery","end","finish","delivery_date","complete","completion"],
-        }
-        want = name if name in candidates else None
-        names = candidates.get(name, [name])
-        for n in names:
-            key = n.lower().strip()
-            if key in colmap:
-                return colmap[key]
-        return None
 
-    base_cols = {
-        "number": get_col("number"),
-        "customer": get_col("customer"),
-        "aircraftModel": get_col("aircraftModel"),
-        "scope": get_col("scope"),
-        "induction": get_col("induction"),
-        "delivery": get_col("delivery"),
-    }
+def upsert_department(key: str, name: str, headcount: int) -> None:
+    con = _conn()
+    try:
+        _exec(
+            con,
+            """
+            INSERT INTO departments (key, name, headcount)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                name = excluded.name,
+                headcount = excluded.headcount;
+            """,
+            (key, name, int(headcount)),
+        )
+        con.commit()
+    finally:
+        con.close()
 
-    imported, errors = 0, []
-    for i, row in df.iterrows():
-        try:
-            rec = {
-                "number": row.get(base_cols["number"]) if base_cols["number"] else None,
-                "customer": row.get(base_cols["customer"]) if base_cols["customer"] else None,
-                "aircraftModel": row.get(base_cols["aircraftModel"]) if base_cols["aircraftModel"] else None,
-                "scope": row.get(base_cols["scope"]) if base_cols["scope"] else None,
-                "induction": row.get(base_cols["induction"]) if base_cols["induction"] else None,
-                "delivery": row.get(base_cols["delivery"]) if base_cols["delivery"] else None,
-            }
-            # departments
-            for k in DEPT_KEYS:
-                rec[k] = row.get(k, 0.0)
-            create_project(rec, category=cat)
-            imported += 1
-        except Exception:
-            errors.append(int(i))
 
-    return {"imported": imported, "errors": errors}
+def delete_department(key: str) -> None:
+    con = _conn()
+    try:
+        _exec(con, "DELETE FROM departments WHERE key = ?;", (key,))
+        con.commit()
+    finally:
+        con.close()
 
-# ------------------------- Seeding -------------------------
-_DEFAULT_DEPTS = [
-    {"key":"Maintenance","name":"Maintenance","headcount":36},
-    {"key":"Structures","name":"Structures","headcount":22},
-    {"key":"Avionics","name":"Avionics","headcount":15},
-    {"key":"Inspection","name":"Inspection","headcount":10},
-    {"key":"Interiors","name":"Interiors","headcount":11},
-    {"key":"Engineering","name":"Engineering","headcount":7},
-    {"key":"Cabinet","name":"Cabinet","headcount":3},
-    {"key":"Upholstery","name":"Upholstery","headcount":7},
-    {"key":"Finish","name":"Finish","headcount":6},
-]
 
-def seed_if_empty(
-    projects: Optional[List[Dict[str, Any]]] = None,
-    potential: Optional[List[Dict[str, Any]]] = None,
-    actual: Optional[List[Dict[str, Any]]] = None,
-    depts: Optional[List[Dict[str, Any]]] = None,
-) -> None:
+# -----------------------------
+# Project CRUD
+# -----------------------------
+# Valid dataset values the app expects to use
+_DATASETS = {"confirmed", "potential", "actual"}
+
+def _normalize_dataset(dataset: str) -> str:
+    d = (dataset or "").strip().lower()
+    if d in _DATASETS:
+        return d
+    # be forgiving with synonyms
+    if d == "projects" or d == "confirmed_projects":
+        return "confirmed"
+    return d
+
+
+def list_projects(dataset: str) -> List[Dict[str, Any]]:
+    ds = _normalize_dataset(dataset)
+    con = _conn()
+    try:
+        rows = _fetchall(
+            con,
+            "SELECT payload FROM projects WHERE dataset = ? ORDER BY number ASC;",
+            (ds,),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+    finally:
+        con.close()
+
+
+def upsert_project(project: Dict[str, Any], dataset: str) -> None:
     """
-    Seed DB if no rows exist. Pass in your DEFAULT_* lists from the app.
+    Upsert a single project. The project dict should include 'number'.
     """
-    init_db()
-    with _SessionLocal() as db:
-        has_projects = db.execute(select(func.count(Project.id))).scalar_one() > 0
-        has_depts = db.execute(select(func.count(Department.id))).scalar_one() > 0
+    ds = _normalize_dataset(dataset)
+    number = str(project.get("number") or "").strip()
+    if not number:
+        raise ValueError("Project 'number' is required for upsert.")
+    con = _conn()
+    try:
+        payload = json.dumps(project)
+        _exec(
+            con,
+            """
+            INSERT INTO projects (dataset, number, payload)
+            VALUES (?, ?, ?)
+            ON CONFLICT(dataset, number) DO UPDATE SET
+                payload = excluded.payload;
+            """,
+            (ds, number, payload),
+        )
+        con.commit()
+    finally:
+        con.close()
 
-    if not has_depts:
-        upsert_departments(depts or _DEFAULT_DEPTS)
 
-    if not has_projects:
-        for arr, cat in ((projects, "confirmed"), (potential, "potential"), (actual, "actual")):
-            if not arr:
+def bulk_upsert_projects(projects: List[Dict[str, Any]], dataset: str) -> None:
+    ds = _normalize_dataset(dataset)
+    con = _conn()
+    try:
+        rows = []
+        for p in projects:
+            number = str(p.get("number") or "").strip()
+            if not number:
+                # skip invalid rows quietly
                 continue
-            for rec in arr:
-                create_project(rec, category=cat)
+            rows.append((ds, number, json.dumps(p)))
+        if rows:
+            con.executemany(
+                """
+                INSERT INTO projects (dataset, number, payload)
+                VALUES (?, ?, ?)
+                ON CONFLICT(dataset, number) DO UPDATE SET
+                    payload = excluded.payload;
+                """,
+                rows,
+            )
+        con.commit()
+    finally:
+        con.close()
 
-# ------------------------- Convenience -------------------------
-def get_all_datasets() -> Dict[str, Any]:
+
+def delete_project(number: str, dataset: str) -> None:
+    ds = _normalize_dataset(dataset)
+    num = str(number or "").strip()
+    if not num:
+        return
+    con = _conn()
+    try:
+        _exec(con, "DELETE FROM projects WHERE dataset = ? AND number = ?;", (ds, num))
+        con.commit()
+    finally:
+        con.close()
+
+
+# -----------------------------
+# Export / Import Utilities
+# -----------------------------
+def export_all() -> Dict[str, Any]:
     """
-    Return everything the Streamlit app expects, grouped like session state:
-    {
-      "projects": [...], "potential": [...], "actual": [...], "depts":[...]
-    }
+    Export departments and all project datasets for backup/download.
     """
-    return {
-        "projects":  list_projects("confirmed"),
-        "potential": list_projects("potential"),
-        "actual":    list_projects("actual"),
-        "depts":     list_departments(),
-    }
+    con = _conn()
+    try:
+        depts = list_departments()
+        all_data = {"departments": depts, "confirmed": [], "potential": [], "actual": []}
+        for ds in ("confirmed", "potential", "actual"):
+            rows = _fetchall(con, "SELECT payload FROM projects WHERE dataset = ?;", (ds,))
+            all_data[ds] = [json.loads(r["payload"]) for r in rows]
+        return all_data
+    finally:
+        con.close()
 
-# ------------------------- Run-once init -------------------------
-# Safe to call multiple times; create_all is idempotent.
-init_db()
 
-if __name__ == "__main__":
-    # Simple smoke test: prints counts
-    init_db()
-    print("Projects (confirmed):", len(list_projects("confirmed")))
-    print("Projects (potential):", len(list_projects("potential")))
-    print("Projects (actual):", len(list_projects("actual")))
-    print("Departments:", len(list_departments()))
+def import_all(blob: Dict[str, Any], replace: bool = False) -> None:
+    """
+    Import a previously exported blob. If replace=True, clears existing rows.
+    """
+    con = _conn()
+    try:
+        if replace:
+            _exec(con, "DELETE FROM departments;")
+            _exec(con, "DELETE FROM projects;")
+
+        # Departments
+        for d in blob.get("departments", []):
+            k = str(d.get("key") or "").strip()
+            n = str(d.get("name") or "").strip() or k
+            hc = int(d.get("headcount") or 0)
+            _exec(
+                con,
+                """
+                INSERT INTO departments (key, name, headcount)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                  name = excluded.name,
+                  headcount = excluded.headcount;
+                """,
+                (k, n, hc),
+            )
+
+        # Projects
+        for ds in ("confirmed", "potential", "actual"):
+            rows = blob.get(ds, []) or []
+            for p in rows:
+                number = str(p.get("number") or "").strip()
+                if not number:
+                    continue
+                _exec(
+                    con,
+                    """
+                    INSERT INTO projects (dataset, number, payload)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(dataset, number) DO UPDATE SET
+                      payload = excluded.payload;
+                    """,
+                    (ds, number, json.dumps(p)),
+                )
+
+        con.commit()
+    finally:
+        con.close()
+
+
+# -----------------------------
+# Module bootstrap convenience
+# -----------------------------
+def init() -> None:
+    """
+    Call on app start.
+    """
+    ensure_schema()
+    seed_if_empty()
+
+
+# Auto-init if imported by Streamlit
+try:
+    init()
+except Exception as e:
+    # Fail-soft: app can handle an empty DB path if necessary
+    print(f"[data_store] init warning: {e}")
