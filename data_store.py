@@ -1,9 +1,8 @@
-# data_store.py
 from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple
 
 DB_PATH = Path(__file__).with_name("capacity.db")
 
@@ -17,6 +16,10 @@ def _conn() -> sqlite3.Connection:
 
 def _exec(con: sqlite3.Connection, sql: str, params: Tuple = ()) -> None:
     con.execute(sql, params)
+
+def _fetchone(con: sqlite3.Connection, sql: str, params: Tuple = ()) -> sqlite3.Row | None:
+    cur = con.execute(sql, params)
+    return cur.fetchone()
 
 def _fetchall(con: sqlite3.Connection, sql: str, params: Tuple = ()) -> List[sqlite3.Row]:
     cur = con.execute(sql, params)
@@ -59,13 +62,14 @@ def _migrate_projects_schema(con: sqlite3.Connection) -> None:
         return
 
     has_dataset = "dataset" in cols
-    has_number  = "number" in cols
+    has_number  = "number"  in cols
     has_payload = "payload" in cols
 
     if has_dataset and has_number and has_payload:
-        return
+        return  # already modern
 
-    json_src: Optional[str] = None
+    # Try to locate an old JSON column to carry forward
+    json_src = None
     for cand in ("json", "data", "payload_json", "project", "content"):
         if cand in cols:
             json_src = cand
@@ -110,6 +114,7 @@ def ensure_schema() -> None:
         _exec(con, "PRAGMA journal_mode=WAL;")
         _exec(con, "PRAGMA foreign_keys=ON;")
 
+        # Departments table (key is the PK; no numeric id)
         _exec(
             con,
             """
@@ -121,7 +126,9 @@ def ensure_schema() -> None:
             """,
         )
 
+        # Projects with migration support
         _migrate_projects_schema(con)
+
         con.commit()
     finally:
         con.close()
@@ -132,7 +139,7 @@ def ensure_schema() -> None:
 def seed_if_empty() -> None:
     con = _conn()
     try:
-        n = con.execute("SELECT COUNT(*) FROM departments").fetchone()[0] or 0
+        n = (_fetchone(con, "SELECT COUNT(*) AS c FROM departments") or {"c": 0})["c"]
         if n == 0:
             con.executemany(
                 "INSERT OR IGNORE INTO departments (key, name, headcount) VALUES (?,?,?)",
@@ -153,64 +160,27 @@ def seed_if_empty() -> None:
         con.close()
 
 # -----------------------------
-# Normalization helpers
+# Helpers for payload hygiene
 # -----------------------------
-def _get_dept_keys(con: sqlite3.Connection | None = None) -> List[str]:
-    close_me = False
-    if con is None:
-        con = _conn()
-        close_me = True
-    try:
-        try:
-            rows = _fetchall(con, "SELECT key FROM departments ORDER BY sort_order, name;")
-        except sqlite3.OperationalError:
-            rows = _fetchall(con, "SELECT key FROM departments ORDER BY name;")
-        return [r["key"] for r in rows]
-    finally:
-        if close_me:
-            con.close()
+def _get_dept_keys(con: sqlite3.Connection) -> List[str]:
+    rows = _fetchall(con, "SELECT key FROM departments ORDER BY key;")
+    return [r["key"] for r in rows]
 
 def _normalize_project_payload(p: Dict[str, Any], dept_keys: List[str]) -> Dict[str, Any]:
-    """
-    Flatten nested hours -> top-level dept keys, normalize field names, coerce numbers,
-    and trim dates to YYYY-MM-DD.
-    """
-    if not isinstance(p, dict):
-        return {}
-
-    if "aircraft" in p and "aircraftModel" not in p:
-        p["aircraftModel"] = p.pop("aircraft")
-
-    hrs = p.get("hours")
-    if isinstance(hrs, dict):
-        for k in dept_keys:
-            v = hrs.get(k, 0)
-            p[k] = float(v) if v is not None else 0.0
-        p.pop("hours", None)
-
-    for k in dept_keys:
-        v = p.get(k, 0.0)
-        try:
-            p[k] = float(v) if v is not None else 0.0
-        except Exception:
-            p[k] = 0.0
-
-    def _norm_date(s):
-        if not s:
-            return s
-        s = str(s).strip()
-        return s.split("T")[0] if "T" in s else s
-
-    p["induction"] = _norm_date(p.get("induction"))
-    p["delivery"]  = _norm_date(p.get("delivery"))
-
-    if p.get("number") is not None:
-        p["number"] = str(p["number"]).strip()
-
+    # Basic fields
+    p = dict(p or {})
+    p.setdefault("number", "")
     p.setdefault("customer", "")
     p.setdefault("aircraftModel", "")
     p.setdefault("scope", "")
-
+    p.setdefault("induction", "")
+    p.setdefault("delivery", "")
+    # Ensure department numeric fields exist
+    for k in dept_keys:
+        try:
+            p[k] = float(p.get(k, 0) or 0)
+        except Exception:
+            p[k] = 0.0
     return p
 
 # -----------------------------
@@ -242,51 +212,34 @@ def upsert_department(key: str, name: str, headcount: int) -> None:
     finally:
         con.close()
 
-def delete_department(key: str) -> Dict[str, Any]:
+def delete_department(key: str) -> None:
     con = _conn()
     try:
-        cur = con.execute("DELETE FROM departments WHERE key = ?;", (key,))
+        _exec(con, "DELETE FROM departments WHERE key = ?;", (key,))
         con.commit()
-        return {"deleted": cur.rowcount or 0}
     finally:
         con.close()
 
 # -----------------------------
-# Project CRUD
+# Dataset normalization
 # -----------------------------
 _DATASETS = {"confirmed", "potential", "actual"}
-
 def _normalize_dataset(dataset: str) -> str:
     d = (dataset or "").strip().lower()
     if d in _DATASETS:
         return d
-    if d in {"projects", "confirmed_projects", "confirmedproject", "confirmed_project"}:
+    if d in {"projects", "confirmed_projects"}:
         return "confirmed"
     return d
 
-def list_projects(category: str) -> List[Dict[str, Any]]:
-    ds = _normalize_dataset(category)
-    con = _conn()
-    try:
-        dept_keys = _get_dept_keys(con)
-        rows = _fetchall(
-            con,
-            "SELECT payload FROM projects WHERE dataset = ? ORDER BY number ASC;",
-            (ds,),
-        )
-        out: List[Dict[str, Any]] = []
-        for r in rows:
-            try:
-                p = json.loads(r["payload"])
-            except Exception:
-                p = {}
-            out.append(_normalize_project_payload(p, dept_keys))
-        return out
-    finally:
-        con.close()
-
-def list_projects_with_rowid(category: str) -> List[Dict[str, Any]]:
-    ds = _normalize_dataset(category)
+# -----------------------------
+# Project CRUD / Queries
+# -----------------------------
+def list_projects(dataset: str) -> List[Dict[str, Any]]:
+    """
+    NOTE: This returns an 'id' for each project (rowid) so the UI can reference it.
+    """
+    ds = _normalize_dataset(dataset)
     con = _conn()
     try:
         dept_keys = _get_dept_keys(con)
@@ -301,32 +254,64 @@ def list_projects_with_rowid(category: str) -> List[Dict[str, Any]]:
                 p = json.loads(r["payload"])
             except Exception:
                 p = {}
-            clean = _normalize_project_payload(p, dept_keys)
+            p = _normalize_project_payload(p, dept_keys)
             rid = int(r["rowid"])
-            # Provide both keys: 'id' for your UI, and '_rowid' for compatibility
-            clean["id"] = rid
-            clean["_rowid"] = rid
-            out.append(clean)
+            p["id"] = rid
+            p["_rowid"] = rid  # back-compat
+            out.append(p)
         return out
     finally:
         con.close()
 
+def list_projects_with_rowid(dataset: str) -> List[Dict[str, Any]]:
+    """
+    Alias of list_projects() that explicitly ensures 'id' exists.
+    """
+    return list_projects(dataset)
 
-def create_project(payload: Dict[str, Any], category: str) -> Dict[str, Any]:
-    """
-    Create or upsert a project by (dataset, number).
-    RETURNS: {'id': rowid, 'dataset': ds, 'number': number}
-    """
-    ds = _normalize_dataset(category)
+def get_project_by_id(project_id: int) -> Dict[str, Any] | None:
     con = _conn()
     try:
         dept_keys = _get_dept_keys(con)
-        clean = _normalize_project_payload(dict(payload), dept_keys)
+        r = _fetchone(con, "SELECT rowid, payload, dataset, number FROM projects WHERE rowid = ?;", (int(project_id),))
+        if not r:
+            return None
+        p = {}
+        try:
+            p = json.loads(r["payload"])
+        except Exception:
+            pass
+        p = _normalize_project_payload(p, dept_keys)
+        p["id"] = int(r["rowid"])
+        p["_rowid"] = int(r["rowid"])
+        p["_dataset"] = r["dataset"]
+        p["_number"] = r["number"]
+        return p
+    finally:
+        con.close()
 
-        number = str(clean.get("number") or "").strip()
-        if not number:
-            raise ValueError("Project 'number' is required.")
+def create_project(payload: Dict[str, Any], category: str) -> Dict[str, Any]:
+    """
+    Inserts a new project into the given dataset. Returns the created project with 'id'.
+    """
+    ds = _normalize_dataset(category)
+    if ds not in _DATASETS:
+        raise ValueError(f"Unknown dataset: {category}")
 
+    number = str(payload.get("number") or "").strip()
+    if not number:
+        raise ValueError("Project 'number' is required.")
+
+    # Ensure minimal fields
+    payload = dict(payload)
+    payload.setdefault("customer", "")
+    payload.setdefault("aircraftModel", "")
+    payload.setdefault("scope", "")
+    payload.setdefault("induction", "")
+    payload.setdefault("delivery", "")
+
+    con = _conn()
+    try:
         _exec(
             con,
             """
@@ -335,87 +320,71 @@ def create_project(payload: Dict[str, Any], category: str) -> Dict[str, Any]:
             ON CONFLICT(dataset, number) DO UPDATE SET
               payload = excluded.payload;
             """,
-            (ds, number, json.dumps(clean)),
+            (ds, number, json.dumps(payload)),
         )
-        # Fetch rowid reliably even on UPSERT
-        row = con.execute(
-            "SELECT rowid FROM projects WHERE dataset=? AND number=?;",
-            (ds, number),
-        ).fetchone()
+        # fetch rowid for this (dataset, number)
+        row = _fetchone(con, "SELECT rowid FROM projects WHERE dataset = ? AND number = ?;", (ds, number))
         con.commit()
-        rid = int(row["rowid"]) if row else None
-        return {"id": rid, "dataset": ds, "number": number}
+        if not row:
+            # Extremely unlikely, but keep it safe
+            return dict(payload)  # no id; avoids crashing
+        rid = int(row["rowid"])
+        # Return normalized result with id
+        dept_keys = _get_dept_keys(con)
+        out = _normalize_project_payload(payload, dept_keys)
+        out["id"] = rid
+        out["_rowid"] = rid
+        return out
     finally:
         con.close()
 
-def update_project(row_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+def update_project(project_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Update a project using its SQLite rowid.
-    RETURNS: {'id': row_id (new or same if PK changed), 'dataset': ds, 'number': new_number}
+    Updates the payload (and keeps number in sync) for the given rowid.
+    Returns the updated project with 'id'.
     """
+    number = str(payload.get("number") or "").strip()
+    if not number:
+        raise ValueError("Project 'number' is required.")
+
     con = _conn()
     try:
-        row = con.execute("SELECT dataset, number FROM projects WHERE rowid = ?;", (row_id,)).fetchone()
-        if not row:
-            raise ValueError("Project not found")
-
-        ds = row["dataset"]
-        old_number = row["number"]
-
-        dept_keys = _get_dept_keys(con)
-        clean = _normalize_project_payload(dict(payload), dept_keys)
-        new_number = str(clean.get("number") or old_number).strip()
-
-        if new_number != old_number:
-            _exec(
-                con,
-                """
-                INSERT INTO projects (dataset, number, payload)
-                VALUES (?, ?, ?)
-                ON CONFLICT(dataset, number) DO UPDATE SET
-                  payload = excluded.payload;
-                """,
-                (ds, new_number, json.dumps(clean)),
-            )
-            _exec(con, "DELETE FROM projects WHERE dataset = ? AND number = ?;", (ds, old_number))
-            # get the new rowid
-            row2 = con.execute(
-                "SELECT rowid FROM projects WHERE dataset=? AND number=?;",
-                (ds, new_number),
-            ).fetchone()
-            rid = int(row2["rowid"]) if row2 else row_id
-        else:
-            _exec(
-                con,
-                "UPDATE projects SET payload = ? WHERE rowid = ?;",
-                (json.dumps(clean), row_id),
-            )
-            rid = row_id
-
+        # We also keep the 'number' column in sync with the JSON's number
+        _exec(
+            con,
+            """
+            UPDATE projects
+               SET number  = ?,
+                   payload = ?
+             WHERE rowid = ?;
+            """,
+            (number, json.dumps(payload), int(project_id)),
+        )
         con.commit()
-        return {"id": rid, "dataset": ds, "number": new_number}
+        return get_project_by_id(int(project_id)) or {"id": int(project_id), **payload}
     finally:
         con.close()
 
-def delete_project(number: str, dataset: str) -> Dict[str, Any]:
+def delete_project(number: str, dataset: str) -> None:
+    """
+    Delete by (dataset, number) – kept for backward compatibility.
+    """
     ds = _normalize_dataset(dataset)
     num = str(number or "").strip()
     if not num:
-        return {"deleted": 0}
+        return
     con = _conn()
     try:
-        cur = con.execute("DELETE FROM projects WHERE dataset = ? AND number = ?;", (ds, num))
+        _exec(con, "DELETE FROM projects WHERE dataset = ? AND number = ?;", (ds, num))
         con.commit()
-        return {"deleted": cur.rowcount or 0, "dataset": ds, "number": num}
     finally:
         con.close()
 
-def delete_project_by_rowid(row_id: int) -> Dict[str, Any]:
+def delete_project_by_id(project_id: int) -> None:
     con = _conn()
     try:
-        cur = con.execute("DELETE FROM projects WHERE rowid = ?;", (row_id,))
+        _exec(con, "DELETE FROM projects WHERE rowid = ?;", (int(project_id),))
         con.commit()
-        return {"deleted": cur.rowcount or 0, "id": row_id}
     finally:
         con.close()
 
@@ -423,14 +392,12 @@ def bulk_upsert_projects(projects: List[Dict[str, Any]], dataset: str) -> None:
     ds = _normalize_dataset(dataset)
     con = _conn()
     try:
-        dept_keys = _get_dept_keys(con)
         rows = []
-        for p in projects or []:
-            clean = _normalize_project_payload(dict(p), dept_keys)
-            number = str(clean.get("number") or "").strip()
+        for p in projects:
+            number = str(p.get("number") or "").strip()
             if not number:
                 continue
-            rows.append((ds, number, json.dumps(clean)))
+            rows.append((ds, number, json.dumps(p)))
         if rows:
             con.executemany(
                 """
@@ -451,15 +418,25 @@ def bulk_upsert_projects(projects: List[Dict[str, Any]], dataset: str) -> None:
 def export_all() -> Dict[str, Any]:
     con = _conn()
     try:
-        dept_keys = _get_dept_keys(con)
         depts = list_departments()
-        all_data = {"departments": depts, "confirmed": [], "potential": [], "actual": []}
+        res = {"departments": depts, "confirmed": [], "potential": [], "actual": []}
         for ds in ("confirmed", "potential", "actual"):
-            rows = _fetchall(con, "SELECT payload FROM projects WHERE dataset = ? ORDER BY number;", (ds,))
-            all_data[ds] = [
-                _normalize_project_payload(json.loads(r["payload"]), dept_keys) for r in rows
-            ]
-        return all_data
+            # include ids as well
+            rows = _fetchall(con, "SELECT rowid, payload FROM projects WHERE dataset = ? ORDER BY number ASC;", (ds,))
+            block = []
+            dept_keys = _get_dept_keys(con)
+            for r in rows:
+                try:
+                    p = json.loads(r["payload"])
+                except Exception:
+                    p = {}
+                p = _normalize_project_payload(p, dept_keys)
+                rid = int(r["rowid"])
+                p["id"] = rid
+                p["_rowid"] = rid
+                block.append(p)
+            res[ds] = block
+        return res
     finally:
         con.close()
 
@@ -470,10 +447,13 @@ def import_all(blob: Dict[str, Any], replace: bool = False) -> None:
             _exec(con, "DELETE FROM departments;")
             _exec(con, "DELETE FROM projects;")
 
+        # Departments
         for d in blob.get("departments", []) or []:
             k = str(d.get("key") or d.get("name") or "").strip()
             n = str(d.get("name") or d.get("key") or "").strip() or k
             hc = int(d.get("headcount") or 0)
+            if not k:
+                continue
             _exec(
                 con,
                 """
@@ -486,12 +466,10 @@ def import_all(blob: Dict[str, Any], replace: bool = False) -> None:
                 (k, n, hc),
             )
 
-        dept_keys = _get_dept_keys(con)
+        # Projects by dataset
         for ds in ("confirmed", "potential", "actual"):
-            rows = blob.get(ds, []) or []
-            for p in rows:
-                clean = _normalize_project_payload(dict(p), dept_keys)
-                number = str(clean.get("number") or "").strip()
+            for p in blob.get(ds, []) or []:
+                number = str(p.get("number") or "").strip()
                 if not number:
                     continue
                 _exec(
@@ -502,8 +480,9 @@ def import_all(blob: Dict[str, Any], replace: bool = False) -> None:
                     ON CONFLICT(dataset, number) DO UPDATE SET
                       payload = excluded.payload;
                     """,
-                    (ds, number, json.dumps(clean)),
+                    (ds, number, json.dumps(p)),
                 )
+
         con.commit()
     finally:
         con.close()
@@ -512,6 +491,9 @@ def import_all(blob: Dict[str, Any], replace: bool = False) -> None:
 # Convenience used by app.py
 # -----------------------------
 def get_all_datasets() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Returns (confirmed, potential, actual, departments) with each project including 'id'.
+    """
     confirmed = list_projects("confirmed")
     potential = list_projects("potential")
     actual    = list_projects("actual")
