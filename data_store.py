@@ -23,38 +23,122 @@ def _fetchall(con: sqlite3.Connection, sql: str, params: Tuple = ()) -> List[sql
     return cur.fetchall()
 
 # -----------------------------
-# Schema & seed
+# Schema & migration
 # -----------------------------
+def _table_exists(con: sqlite3.Connection, name: str) -> bool:
+    r = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;", (name,)
+    ).fetchone()
+    return r is not None
+
+def _projects_columns(con: sqlite3.Connection) -> List[str]:
+    if not _table_exists(con, "projects"):
+        return []
+    cols = _fetchall(con, "PRAGMA table_info(projects);")
+    return [c["name"] for c in cols]
+
+def _migrate_projects_schema(con: sqlite3.Connection) -> None:
+    """
+    Ensure projects has columns: dataset TEXT, number TEXT, payload TEXT, PK(dataset, number).
+    If the table exists but lacks 'payload' (or uses a different JSON column name),
+    copy into a fresh table and swap.
+    """
+    cols = _projects_columns(con)
+    if not cols:
+        # No projects table yet: create the modern one
+        _exec(
+            con,
+            """
+            CREATE TABLE IF NOT EXISTS projects (
+                dataset TEXT NOT NULL,
+                number  TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY (dataset, number)
+            );
+            """,
+        )
+        return
+
+    has_dataset = "dataset" in cols
+    has_number = "number" in cols
+    has_payload = "payload" in cols
+
+    if has_dataset and has_number and has_payload:
+        # Already modern enough
+        return
+
+    # Try to locate an old JSON column to carry forward
+    json_src = None
+    for cand in ("json", "data", "payload_json", "project", "content"):
+        if cand in cols:
+            json_src = cand
+            break
+
+    # Create a fresh, correct table
+    _exec(
+        con,
+        """
+        CREATE TABLE IF NOT EXISTS projects_new (
+            dataset TEXT NOT NULL,
+            number  TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            PRIMARY KEY (dataset, number)
+        );
+        """,
+    )
+
+    if has_dataset and has_number:
+        if json_src:
+            # Copy existing JSON column into payload
+            _exec(
+                con,
+                f"""
+                INSERT OR IGNORE INTO projects_new (dataset, number, payload)
+                SELECT dataset, number, {json_src} FROM projects;
+                """,
+            )
+        else:
+            # No JSON column found; preserve keys, set empty payload
+            _exec(
+                con,
+                """
+                INSERT OR IGNORE INTO projects_new (dataset, number, payload)
+                SELECT dataset, number, '{}' FROM projects;
+                """,
+            )
+
+    # Swap tables
+    _exec(con, "DROP TABLE projects;")
+    _exec(con, "ALTER TABLE projects_new RENAME TO projects;")
+
 def ensure_schema() -> None:
     con = _conn()
     try:
-        con.execute("PRAGMA journal_mode=WAL;")
-        con.execute("PRAGMA foreign_keys=ON;")
+        _exec(con, "PRAGMA journal_mode=WAL;")
+        _exec(con, "PRAGMA foreign_keys=ON;")
 
-        con.execute(
+        # Departments is simple: key is the PK (no numeric id)
+        _exec(
+            con,
             """
             CREATE TABLE IF NOT EXISTS departments (
                 key TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 headcount INTEGER NOT NULL DEFAULT 0
             );
-            """
+            """,
         )
 
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS projects (
-                dataset TEXT NOT NULL,         -- 'confirmed' | 'potential' | 'actual'
-                number  TEXT NOT NULL,         -- project number (unique per dataset)
-                payload TEXT NOT NULL,         -- full JSON blob of the project
-                PRIMARY KEY (dataset, number)
-            );
-            """
-        )
+        # Projects (with migration support)
+        _migrate_projects_schema(con)
+
         con.commit()
     finally:
         con.close()
 
+# -----------------------------
+# Seed data
+# -----------------------------
 def seed_if_empty() -> None:
     con = _conn()
     try:
@@ -263,8 +347,6 @@ def import_all(blob: Dict[str, Any], replace: bool = False) -> None:
 def get_all_datasets() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Returns (confirmed, potential, actual, departments)
-    so callers can do:
-        confirmed, potential, actual, depts = data_store.get_all_datasets()
     """
     confirmed = list_projects("confirmed")
     potential = list_projects("potential")
@@ -276,21 +358,19 @@ def replace_all_datasets(confirmed: List[Dict[str, Any]],
                          potential: List[Dict[str, Any]],
                          actual: List[Dict[str, Any]],
                          departments: List[Dict[str, Any]]) -> None:
-    """
-    Convenience to wipe and replace everything in one shot.
-    Useful for CSV/JSON upload flows from the UI.
-    """
     con = _conn()
     try:
         _exec(con, "DELETE FROM projects;")
         _exec(con, "DELETE FROM departments;")
         con.commit()
 
-        # Departments
         for d in departments or []:
-            upsert_department(d.get("key") or d.get("name"), d.get("name") or d.get("key"), int(d.get("headcount") or 0))
+            upsert_department(
+                d.get("key") or d.get("name"),
+                d.get("name") or d.get("key"),
+                int(d.get("headcount") or 0),
+            )
 
-        # Projects
         bulk_upsert_projects(confirmed or [], "confirmed")
         bulk_upsert_projects(potential or [], "potential")
         bulk_upsert_projects(actual or [], "actual")
