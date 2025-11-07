@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 DB_PATH = Path(__file__).with_name("capacity.db")
 
@@ -200,7 +200,7 @@ def delete_department(key: str) -> None:
         con.close()
 
 # -----------------------------
-# Project CRUD
+# Project CRUD (JSON payload model)
 # -----------------------------
 _DATASETS = {"confirmed", "potential", "actual"}
 
@@ -225,6 +225,31 @@ def list_projects(dataset: str) -> List[Dict[str, Any]]:
     finally:
         con.close()
 
+def _get_project_row(dataset: str, number: str) -> Optional[sqlite3.Row]:
+    ds = _normalize_dataset(dataset)
+    num = str(number or "").strip()
+    if not num:
+        return None
+    con = _conn()
+    try:
+        row = con.execute(
+            "SELECT dataset, number, payload FROM projects WHERE dataset = ? AND number = ?;",
+            (ds, num),
+        ).fetchone()
+        return row
+    finally:
+        con.close()
+
+def get_project(number: str, dataset: str = "confirmed") -> Optional[Dict[str, Any]]:
+    """Return a single project payload dict or None."""
+    row = _get_project_row(dataset, number)
+    if not row:
+        return None
+    try:
+        return json.loads(row["payload"])
+    except Exception:
+        return None
+
 def upsert_project(project: Dict[str, Any], dataset: str) -> None:
     ds = _normalize_dataset(dataset)
     number = str(project.get("number") or "").strip()
@@ -246,6 +271,29 @@ def upsert_project(project: Dict[str, Any], dataset: str) -> None:
         con.commit()
     finally:
         con.close()
+
+def create_project(project: Dict[str, Any], dataset: str = "confirmed") -> Dict[str, Any]:
+    """
+    Admin-friendly alias for insert/update that returns the saved payload.
+    """
+    upsert_project(project, dataset)
+    # read back to return a normalized dict
+    return get_project(project.get("number"), dataset) or project
+
+def update_project(number: str, changes: Dict[str, Any], dataset: str = "confirmed") -> Dict[str, Any]:
+    """
+    Merge 'changes' into existing project (by number,dataset) and save.
+    Returns the updated payload dict.
+    """
+    number = str(number or "").strip()
+    if not number:
+        raise ValueError("Project 'number' is required for update.")
+    current = get_project(number, dataset) or {"number": number}
+    # protect dataset/number keys; allow all other fields to be overwritten
+    merged = dict(current)
+    merged.update({k: v for k, v in (changes or {}).items() if k not in {"dataset", "number"}})
+    upsert_project(merged, dataset)
+    return get_project(number, dataset) or merged
 
 def bulk_upsert_projects(projects: List[Dict[str, Any]], dataset: str) -> None:
     ds = _normalize_dataset(dataset)
