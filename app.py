@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit.components.v1 as components
 
 import data_store as ds  # <- your persistence layer from earlier
+ds.init()
 
 st.set_page_config(layout="wide", page_title="Capacity & Load Dashboard")
 
@@ -1629,6 +1630,24 @@ else:
     #depts = data["depts"]
 
     confirmed, potential, actual, depts = ds.get_all_datasets()
+
+    # If departments were cleared at some point, repopulate and reload
+    if not depts:
+        default_depts = [
+            {"key":"Maintenance","name":"Maintenance","headcount":36},
+            {"key":"Structures","name":"Structures","headcount":22},
+            {"key":"Avionics","name":"Avionics","headcount":15},
+            {"key":"Inspection","name":"Inspection","headcount":10},
+            {"key":"Interiors","name":"Interiors","headcount":11},
+            {"key":"Engineering","name":"Engineering","headcount":7},
+            {"key":"Cabinet","name":"Cabinet","headcount":3},
+            {"key":"Upholstery","name":"Upholstery","headcount":7},
+            {"key":"Finish","name":"Finish","headcount":6},
+        ]
+        for d in default_depts:
+            ds.upsert_department(d["key"], d["name"], d["headcount"])
+        depts = ds.list_departments()
+
 
     potential_all = potential or []
 
