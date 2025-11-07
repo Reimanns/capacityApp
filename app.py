@@ -7,6 +7,19 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 
+import os
+import data_store as ds
+
+ds.init_db(os.getenv("DB_PATH", r"M:\Engineering Projects\capacity.db"))  # or "capacity.db" locally
+ds.seed_if_empty(DEFAULT_PROJECTS, DEFAULT_POTENTIAL, DEFAULT_ACTUAL, DEFAULT_DEPTS)
+
+_loaded = ds.load_all()
+if "projects" not in st.session_state:  st.session_state.projects  = _loaded["projects"]
+if "potential" not in st.session_state: st.session_state.potential = _loaded["potential"]
+if "actual" not in st.session_state:    st.session_state.actual    = _loaded["actual"]
+if "depts" not in st.session_state:     st.session_state.depts     = _loaded["depts"]
+
+
 st.set_page_config(layout="wide", page_title="Labor Capacity Dashboard")
 try:
     st.image("citadel_logo.png", width=200)
@@ -97,14 +110,28 @@ with st.sidebar.form("quick_edit"):
         reset_btn = st.form_submit_button("Reset to Defaults", use_container_width=True)
 
 if apply_btn:
-    entry = {"number": number.strip(), "customer": customer.strip(), "aircraftModel": aircraft.strip(),
-             "scope": scope.strip(), "induction": induction, "delivery": delivery}
-    for k in dept_keys(): entry[k] = float(hours_inputs[k] or 0.0)
-    if select_existing == "➕ New Project":
-        st.session_state[dataset_key].append(entry)
-    else:
-        st.session_state[dataset_key][idx] = entry
-    st.toast("Dataset updated", icon="✅")
+    entry = {
+        "number": number.strip(),
+        "customer": customer.strip(),
+        "aircraftModel": aircraft.strip(),
+        "scope": scope.strip(),
+        "induction": induction,
+        "delivery": delivery,
+    }
+    for k in dept_keys():
+        entry[k] = float(hours_inputs[k] or 0.0)
+
+    # Persist to DB and refresh session_state
+    ds.upsert_project(dataset_key, entry)
+    ref = ds.load_all()
+    st.session_state.projects  = ref["projects"]
+    st.session_state.potential = ref["potential"]
+    st.session_state.actual    = ref["actual"]
+    st.session_state.depts     = ref["depts"]
+
+    st.toast("Saved to database ✔️")
+
+    
 
 if reset_btn:
     st.session_state.projects  = deepcopy(DEFAULT_PROJECTS)
