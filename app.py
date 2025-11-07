@@ -149,7 +149,6 @@ if reset_btn:
     st.session_state.depts     = ref["depts"]
     st.toast("All datasets reset to defaults (DB + UI)", icon="↩️")
 # --------------------- BULK EDIT ---------------------
-\1
 
     if st.button("Save bulk edits to DB", key="save_bulk", type="primary"):
         ds.replace_dataset("projects",  st.session_state.projects)
@@ -162,7 +161,6 @@ if reset_btn:
         st.session_state.actual    = ref["actual"]
         st.toast("Bulk edits saved to database ✔️")
 
-\1
 
     if st.button("Save headcounts to DB", key="save_depts", type="primary"):
         ds.save_depts(st.session_state.depts)
