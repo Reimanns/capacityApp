@@ -10,7 +10,7 @@ import streamlit.components.v1 as components
 
 # Use your existing Google Sheets CRUD layer
 try:
-    import gsheets_store as ds
+    import data_store as ds
 except Exception as e:
     st.stop()
 
