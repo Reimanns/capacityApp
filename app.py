@@ -1630,6 +1630,8 @@ else:
 
     confirmed, potential, actual, depts = ds.get_all_datasets()
 
+    potential_all = potential or []
+
     # Server-side filter: choose which potential projects to include
     st.subheader("Filters (Server-side)")
     if potential_all:
