@@ -45,7 +45,6 @@ def _migrate_projects_schema(con: sqlite3.Connection) -> None:
     """
     cols = _projects_columns(con)
     if not cols:
-        # No projects table yet: create the modern one
         _exec(
             con,
             """
@@ -64,17 +63,14 @@ def _migrate_projects_schema(con: sqlite3.Connection) -> None:
     has_payload = "payload" in cols
 
     if has_dataset and has_number and has_payload:
-        # Already modern enough
         return
 
-    # Try to locate an old JSON column to carry forward
     json_src: Optional[str] = None
     for cand in ("json", "data", "payload_json", "project", "content"):
         if cand in cols:
             json_src = cand
             break
 
-    # Create a fresh, correct table
     _exec(
         con,
         """
@@ -89,7 +85,6 @@ def _migrate_projects_schema(con: sqlite3.Connection) -> None:
 
     if has_dataset and has_number:
         if json_src:
-            # Copy existing JSON column into payload
             _exec(
                 con,
                 f"""
@@ -98,7 +93,6 @@ def _migrate_projects_schema(con: sqlite3.Connection) -> None:
                 """,
             )
         else:
-            # No JSON column found; preserve keys, set empty payload
             _exec(
                 con,
                 """
@@ -107,7 +101,6 @@ def _migrate_projects_schema(con: sqlite3.Connection) -> None:
                 """,
             )
 
-    # Swap tables
     _exec(con, "DROP TABLE projects;")
     _exec(con, "ALTER TABLE projects_new RENAME TO projects;")
 
@@ -117,7 +110,6 @@ def ensure_schema() -> None:
         _exec(con, "PRAGMA journal_mode=WAL;")
         _exec(con, "PRAGMA foreign_keys=ON;")
 
-        # Departments: 'key' is the primary key (no numeric id required)
         _exec(
             con,
             """
@@ -129,9 +121,7 @@ def ensure_schema() -> None:
             """,
         )
 
-        # Projects (with migration support)
         _migrate_projects_schema(con)
-
         con.commit()
     finally:
         con.close()
@@ -183,27 +173,21 @@ def _get_dept_keys(con: sqlite3.Connection | None = None) -> List[str]:
 def _normalize_project_payload(p: Dict[str, Any], dept_keys: List[str]) -> Dict[str, Any]:
     """
     Flatten nested hours -> top-level dept keys, normalize field names, coerce numbers,
-    and trim dates to YYYY-MM-DD (JS tolerates both but we keep it simple).
+    and trim dates to YYYY-MM-DD.
     """
     if not isinstance(p, dict):
         return {}
 
-    # Accept "aircraft" as alias of "aircraftModel"
     if "aircraft" in p and "aircraftModel" not in p:
         p["aircraftModel"] = p.pop("aircraft")
 
-    # Flatten nested "hours" dict if present
     hrs = p.get("hours")
     if isinstance(hrs, dict):
         for k in dept_keys:
             v = hrs.get(k, 0)
             p[k] = float(v) if v is not None else 0.0
-        try:
-            del p["hours"]
-        except KeyError:
-            pass
+        p.pop("hours", None)
 
-    # Ensure every department key exists at top-level and is numeric
     for k in dept_keys:
         v = p.get(k, 0.0)
         try:
@@ -211,7 +195,6 @@ def _normalize_project_payload(p: Dict[str, Any], dept_keys: List[str]) -> Dict[
         except Exception:
             p[k] = 0.0
 
-    # Normalize ISO-ish dates to YYYY-MM-DD (the front-end supports either, this is consistent)
     def _norm_date(s):
         if not s:
             return s
@@ -221,11 +204,9 @@ def _normalize_project_payload(p: Dict[str, Any], dept_keys: List[str]) -> Dict[
     p["induction"] = _norm_date(p.get("induction"))
     p["delivery"]  = _norm_date(p.get("delivery"))
 
-    # Stringify number for PK consistency
     if p.get("number") is not None:
         p["number"] = str(p["number"]).strip()
 
-    # Some optional friendly defaults
     p.setdefault("customer", "")
     p.setdefault("aircraftModel", "")
     p.setdefault("scope", "")
@@ -261,11 +242,12 @@ def upsert_department(key: str, name: str, headcount: int) -> None:
     finally:
         con.close()
 
-def delete_department(key: str) -> None:
+def delete_department(key: str) -> Dict[str, Any]:
     con = _conn()
     try:
-        _exec(con, "DELETE FROM departments WHERE key = ?;", (key,))
+        cur = con.execute("DELETE FROM departments WHERE key = ?;", (key,))
         con.commit()
+        return {"deleted": cur.rowcount or 0}
     finally:
         con.close()
 
@@ -283,7 +265,6 @@ def _normalize_dataset(dataset: str) -> str:
     return d
 
 def list_projects(category: str) -> List[Dict[str, Any]]:
-    """Return normalized project payloads for a dataset."""
     ds = _normalize_dataset(category)
     con = _conn()
     try:
@@ -305,7 +286,6 @@ def list_projects(category: str) -> List[Dict[str, Any]]:
         con.close()
 
 def list_projects_with_rowid(category: str) -> List[Dict[str, Any]]:
-    """Same as list_projects, but include SQLite rowid for admin editing."""
     ds = _normalize_dataset(category)
     con = _conn()
     try:
@@ -328,9 +308,10 @@ def list_projects_with_rowid(category: str) -> List[Dict[str, Any]]:
     finally:
         con.close()
 
-def create_project(payload: Dict[str, Any], category: str) -> None:
+def create_project(payload: Dict[str, Any], category: str) -> Dict[str, Any]:
     """
-    Create or update a project by (dataset, number). Signature chosen to match app.py calls.
+    Create or upsert a project by (dataset, number).
+    RETURNS: {'id': rowid, 'dataset': ds, 'number': number}
     """
     ds = _normalize_dataset(category)
     con = _conn()
@@ -352,17 +333,24 @@ def create_project(payload: Dict[str, Any], category: str) -> None:
             """,
             (ds, number, json.dumps(clean)),
         )
+        # Fetch rowid reliably even on UPSERT
+        row = con.execute(
+            "SELECT rowid FROM projects WHERE dataset=? AND number=?;",
+            (ds, number),
+        ).fetchone()
         con.commit()
+        rid = int(row["rowid"]) if row else None
+        return {"id": rid, "dataset": ds, "number": number}
     finally:
         con.close()
 
-def update_project(row_id: int, payload: Dict[str, Any]) -> None:
+def update_project(row_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Update a project using its SQLite rowid (used by Admin/Manage page).
+    Update a project using its SQLite rowid.
+    RETURNS: {'id': row_id (new or same if PK changed), 'dataset': ds, 'number': new_number}
     """
     con = _conn()
     try:
-        # Find existing entry to preserve dataset/number pairing
         row = con.execute("SELECT dataset, number FROM projects WHERE rowid = ?;", (row_id,)).fetchone()
         if not row:
             raise ValueError("Project not found")
@@ -375,7 +363,6 @@ def update_project(row_id: int, payload: Dict[str, Any]) -> None:
         new_number = str(clean.get("number") or old_number).strip()
 
         if new_number != old_number:
-            # Upsert new PK and delete the old one
             _exec(
                 con,
                 """
@@ -387,35 +374,44 @@ def update_project(row_id: int, payload: Dict[str, Any]) -> None:
                 (ds, new_number, json.dumps(clean)),
             )
             _exec(con, "DELETE FROM projects WHERE dataset = ? AND number = ?;", (ds, old_number))
+            # get the new rowid
+            row2 = con.execute(
+                "SELECT rowid FROM projects WHERE dataset=? AND number=?;",
+                (ds, new_number),
+            ).fetchone()
+            rid = int(row2["rowid"]) if row2 else row_id
         else:
             _exec(
                 con,
-                "UPDATE projects SET payload = ? WHERE dataset = ? AND number = ?;",
-                (json.dumps(clean), ds, old_number),
+                "UPDATE projects SET payload = ? WHERE rowid = ?;",
+                (json.dumps(clean), row_id),
             )
+            rid = row_id
+
         con.commit()
+        return {"id": rid, "dataset": ds, "number": new_number}
     finally:
         con.close()
 
-def delete_project(number: str, dataset: str) -> None:
-    """Delete by (dataset, number)."""
+def delete_project(number: str, dataset: str) -> Dict[str, Any]:
     ds = _normalize_dataset(dataset)
     num = str(number or "").strip()
     if not num:
-        return
+        return {"deleted": 0}
     con = _conn()
     try:
-        _exec(con, "DELETE FROM projects WHERE dataset = ? AND number = ?;", (ds, num))
+        cur = con.execute("DELETE FROM projects WHERE dataset = ? AND number = ?;", (ds, num))
         con.commit()
+        return {"deleted": cur.rowcount or 0, "dataset": ds, "number": num}
     finally:
         con.close()
 
-def delete_project_by_rowid(row_id: int) -> None:
-    """Delete by SQLite rowid (handy for Admin table actions)."""
+def delete_project_by_rowid(row_id: int) -> Dict[str, Any]:
     con = _conn()
     try:
-        _exec(con, "DELETE FROM projects WHERE rowid = ?;", (row_id,))
+        cur = con.execute("DELETE FROM projects WHERE rowid = ?;", (row_id,))
         con.commit()
+        return {"deleted": cur.rowcount or 0, "id": row_id}
     finally:
         con.close()
 
@@ -470,7 +466,6 @@ def import_all(blob: Dict[str, Any], replace: bool = False) -> None:
             _exec(con, "DELETE FROM departments;")
             _exec(con, "DELETE FROM projects;")
 
-        # Departments
         for d in blob.get("departments", []) or []:
             k = str(d.get("key") or d.get("name") or "").strip()
             n = str(d.get("name") or d.get("key") or "").strip() or k
@@ -487,7 +482,6 @@ def import_all(blob: Dict[str, Any], replace: bool = False) -> None:
                 (k, n, hc),
             )
 
-        # Projects
         dept_keys = _get_dept_keys(con)
         for ds in ("confirmed", "potential", "actual"):
             rows = blob.get(ds, []) or []
@@ -514,9 +508,6 @@ def import_all(blob: Dict[str, Any], replace: bool = False) -> None:
 # Convenience used by app.py
 # -----------------------------
 def get_all_datasets() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Returns (confirmed, potential, actual, departments) — all normalized for the front-end.
-    """
     confirmed = list_projects("confirmed")
     potential = list_projects("potential")
     actual    = list_projects("actual")
@@ -527,17 +518,12 @@ def replace_all_datasets(confirmed: List[Dict[str, Any]],
                          potential: List[Dict[str, Any]],
                          actual: List[Dict[str, Any]],
                          departments: List[Dict[str, Any]]) -> None:
-    """
-    Replace entire DB contents with in-memory datasets (used by 'Upload JSON' admin flow).
-    Automatically normalizes project payloads for the UI.
-    """
     con = _conn()
     try:
         _exec(con, "DELETE FROM projects;")
         _exec(con, "DELETE FROM departments;")
         con.commit()
 
-        # Departments first
         for d in departments or []:
             upsert_department(
                 d.get("key") or d.get("name"),
@@ -545,7 +531,6 @@ def replace_all_datasets(confirmed: List[Dict[str, Any]],
                 int(d.get("headcount") or 0),
             )
 
-        # Projects by dataset
         bulk_upsert_projects(confirmed or [], "confirmed")
         bulk_upsert_projects(potential or [], "potential")
         bulk_upsert_projects(actual or [], "actual")
