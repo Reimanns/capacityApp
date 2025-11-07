@@ -18,6 +18,137 @@ try:
 except Exception:
     pass
 
+# -------------------------------------------------------------------
+# UI SKIN (pure CSS + tiny helpers) — logic unchanged
+# -------------------------------------------------------------------
+from contextlib import contextmanager
+import streamlit as st
+
+def inject_ui_skin():
+    st.markdown("""
+    <style>
+      /* ---- Brand & palette to match your HTML template ---- */
+      :root{
+        --brand:#003366;
+        --brand-20: rgba(0,51,102,0.08);
+        --capacity:#d32f2f;
+        --potential:#2e7d32;
+        --actual:#ef6c00;
+        --muted:#6b7280;
+        --text:#111827;
+        --bg:#f5f6f8;
+        --card:#ffffff;
+        --border:#e5e7eb;
+        --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+      }
+
+      /* Page background, center content a bit more */
+      [data-testid="stAppViewContainer"] > .main {
+        background: var(--bg);
+        padding-top: 12px;
+      }
+      [data-testid="stHeader"] { background: transparent; }
+
+      /* Headings */
+      h1, h2, h3, h4 { color: var(--text); }
+      h1 { text-align:center; margin-top: 0.25rem; }
+
+      /* Generic “card” feel for blocks (we apply this via a wrapper) */
+      .ui-card {
+        border:1px solid var(--border);
+        border-radius:12px;
+        background: var(--card);
+        box-shadow: var(--shadow);
+        padding: 16px 16px;
+        margin-bottom: 14px;
+      }
+
+      /* “Metric” chips like your HTML template */
+      .metric-row {
+        display:flex; gap:12px; flex-wrap:wrap; align-items:stretch;
+        margin: 8px 0 2px;
+      }
+      .metric {
+        border:1px solid var(--border); border-radius:10px;
+        background:#fff; padding:10px 14px; min-width: 220px;
+        box-shadow: var(--shadow);
+      }
+      .metric .label { font-size:12px; color:var(--muted); margin-bottom:4px; }
+      .metric .value { font-weight:700; font-size:18px; color:var(--text); }
+
+      /* Tabs */
+      [data-testid="stTabs"] button[role="tab"] {
+        border:1px solid var(--border) !important;
+        background:#fff !important;
+        border-radius:10px !important;
+        margin-right: 8px !important;
+        box-shadow: var(--shadow);
+      }
+
+      /* Inputs: compact, rounded, subtle borders */
+      [data-testid="stTextInput"] input,
+      [data-testid="stNumberInput"] input,
+      [data-testid="stDateInput"] input,
+      [data-testid="stSelectbox"] div[role="combobox"],
+      [data-testid="stMultiSelect"] div[role="combobox"],
+      [data-baseweb="slider"] {
+        border:1px solid var(--border);
+        border-radius:10px;
+        background:#fff;
+      }
+
+      /* Buttons */
+      [data-testid="baseButton-secondary"], [data-testid="baseButton-primary"],
+      .stDownloadButton>button, .stButton>button {
+        border:1px solid var(--border);
+        border-radius:10px;
+        background:#111827; color:#fff;
+        box-shadow: var(--shadow);
+      }
+      .stButton>button[kind="secondary"], [data-testid="baseButton-secondary"] {
+        background:#fff; color:#111827;
+      }
+      .stButton>button:hover, .stDownloadButton>button:hover {
+        filter:brightness(0.92);
+      }
+
+      /* Dataframe container */
+      [data-testid="stDataFrame"] {
+        border:1px solid var(--border); border-radius:12px; box-shadow: var(--shadow);
+        background:#fff; padding: 6px;
+      }
+
+      /* Sidebar Polishing */
+      [data-testid="stSidebar"] {
+        background: #f8fafc;
+        border-right: 1px solid var(--border);
+      }
+    </style>
+    """, unsafe_allow_html=True)
+
+@contextmanager
+def ui_card(title=None, subtitle=None):
+    """Visual wrapper only (no logic)."""
+    st.markdown('<div class="ui-card">', unsafe_allow_html=True)
+    if title:
+        st.markdown(f"### {title}")
+    if subtitle:
+        st.caption(subtitle)
+    yield
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def ui_metrics(items):
+    """items = list of (label, value_str)"""
+    html = '<div class="metric-row">' + ''.join(
+        f'<div class="metric"><div class="label">{lbl}</div><div class="value">{val}</div></div>'
+        for (lbl, val) in items
+    ) + '</div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+# call once right after set_page_config(...)
+inject_ui_skin()
+
+
 # --------------------- DEFAULT DATA (YOUR SET) ---------------------
 DEFAULT_PROJECTS = [
     {"number":"P7657","customer":"Kaiser","aircraftModel":"B737","scope":"Starlink","induction":"2025-11-15T00:00:00","delivery":"2025-11-25T00:00:00","Maintenance":93.57,"Structures":240.61,"Avionics":294.07,"Inspection":120.3,"Interiors":494.58,"Engineering":80.2,"Cabinet":0,"Upholstery":0,"Finish":13.37},
