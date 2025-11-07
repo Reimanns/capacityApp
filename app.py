@@ -10,14 +10,6 @@ import pandas as pd
 import os
 import data_store as ds
 
-ds.init_db(os.getenv("DB_PATH", r"M:\Engineering Projects\capacity.db"))  # or "capacity.db" locally
-ds.seed_if_empty(DEFAULT_PROJECTS, DEFAULT_POTENTIAL, DEFAULT_ACTUAL, DEFAULT_DEPTS)
-
-_loaded = ds.load_all()
-if "projects" not in st.session_state:  st.session_state.projects  = _loaded["projects"]
-if "potential" not in st.session_state: st.session_state.potential = _loaded["potential"]
-if "actual" not in st.session_state:    st.session_state.actual    = _loaded["actual"]
-if "depts" not in st.session_state:     st.session_state.depts     = _loaded["depts"]
 
 
 st.set_page_config(layout="wide", page_title="Labor Capacity Dashboard")
@@ -61,6 +53,16 @@ DEFAULT_DEPTS = [
     {"name":"Upholstery","headcount":7,"key":"Upholstery"},
     {"name":"Finish","headcount":6,"key":"Finish"},
 ]
+# ---- Persistence boot (place AFTER DEFAULT_* are defined) ----
+ds.init_db(os.getenv("DB_PATH", r"M:\Engineering Projects\capacity.db"))  # or "capacity.db" locally
+ds.seed_if_empty(DEFAULT_PROJECTS, DEFAULT_POTENTIAL, DEFAULT_ACTUAL, DEFAULT_DEPTS)
+
+_loaded = ds.load_all()
+st.session_state.setdefault("projects",  _loaded["projects"])
+st.session_state.setdefault("potential", _loaded["potential"])
+st.session_state.setdefault("actual",    _loaded["actual"])
+st.session_state.setdefault("depts",     _loaded["depts"])
+
 
 # --------------------- SESSION STATE ---------------------
 if "projects" not in st.session_state:
@@ -133,30 +135,40 @@ if apply_btn:
 
     
 
+
 if reset_btn:
-    st.session_state.projects  = deepcopy(DEFAULT_PROJECTS)
-    st.session_state.potential = deepcopy(DEFAULT_POTENTIAL)
-    st.session_state.actual    = deepcopy(DEFAULT_ACTUAL)
-    st.session_state.depts     = deepcopy(DEFAULT_DEPTS)
-    st.toast("All datasets reset to defaults", icon="↩️")
+    ds.replace_dataset("projects",  DEFAULT_PROJECTS)
+    ds.replace_dataset("potential", DEFAULT_POTENTIAL)
+    ds.replace_dataset("actual",    DEFAULT_ACTUAL)
+    ds.save_depts(DEFAULT_DEPTS)
 
+    ref = ds.load_all()
+    st.session_state.projects  = ref["projects"]
+    st.session_state.potential = ref["potential"]
+    st.session_state.actual    = ref["actual"]
+    st.session_state.depts     = ref["depts"]
+    st.toast("All datasets reset to defaults (DB + UI)", icon="↩️")
 # --------------------- BULK EDIT ---------------------
-with st.expander("Bulk Edit: Confirmed / Potential / Actual", expanded=False):
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        df_proj = st.data_editor(pd.DataFrame(st.session_state.projects), key="ed_confirmed", height=300)
-        st.session_state.projects = df_proj.astype(object).to_dict(orient="records")
-    with c2:
-        df_pot = st.data_editor(pd.DataFrame(st.session_state.potential), key="ed_potential", height=300)
-        st.session_state.potential = df_pot.astype(object).to_dict(orient="records")
-    with c3:
-        df_act = st.data_editor(pd.DataFrame(st.session_state.actual), key="ed_actual", height=300)
-        st.session_state.actual = df_act.astype(object).to_dict(orient="records")
+\1
 
-with st.expander("Edit Department Headcounts", expanded=False):
-    df_depts = st.data_editor(pd.DataFrame(st.session_state.depts), key="ed_depts", height=240)
-    df_depts["headcount"] = pd.to_numeric(df_depts["headcount"], errors="coerce").fillna(0).astype(int)
-    st.session_state.depts = df_depts.to_dict(orient="records")
+    if st.button("Save bulk edits to DB", key="save_bulk", type="primary"):
+        ds.replace_dataset("projects",  st.session_state.projects)
+        ds.replace_dataset("potential", st.session_state.potential)
+        ds.replace_dataset("actual",    st.session_state.actual)
+
+        ref = ds.load_all()
+        st.session_state.projects  = ref["projects"]
+        st.session_state.potential = ref["potential"]
+        st.session_state.actual    = ref["actual"]
+        st.toast("Bulk edits saved to database ✔️")
+
+\1
+
+    if st.button("Save headcounts to DB", key="save_depts", type="primary"):
+        ds.save_depts(st.session_state.depts)
+        ref = ds.load_all()
+        st.session_state.depts = ref["depts"]
+        st.toast("Headcounts saved ✔️")
 
 st.markdown("---")
 
