@@ -1622,11 +1622,13 @@ else:
     st.title("Capacity & Load Dashboard")
 
     # Pull live datasets
-    data = ds.get_all_datasets()
-    confirmed = data["projects"]
-    potential_all = data["potential"]
-    actual = data["actual"]
-    depts = data["depts"]
+    #data = ds.get_all_datasets()
+    #confirmed = data["projects"]
+    #potential_all = data["potential"]
+    #actual = data["actual"]
+    #depts = data["depts"]
+
+    confirmed, potential, actual, depts = ds.get_all_datasets()
 
     # Server-side filter: choose which potential projects to include
     st.subheader("Filters (Server-side)")
