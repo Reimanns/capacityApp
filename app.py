@@ -8,7 +8,7 @@ import streamlit.components.v1 as components
 import pandas as pd
 
 import os
-import gsheets_store as ds
+import data_store as ds
 
 
 
