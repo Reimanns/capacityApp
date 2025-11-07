@@ -1,474 +1,420 @@
-# =======================
-# file: data_store.py
-# =======================
-import json
-import sqlite3
-from contextlib import contextmanager
-from typing import Dict, List, Optional
+# data_store.py
+"""
+Lightweight persistence layer for the Capacity/Load app.
 
-DB_PATH = "capacity.db"
+- Defaults to local SQLite file: ./capacity.db
+- Optional hosted DB: set DB_URL (and optionally DB_TOKEN) in env or Streamlit secrets.toml
+    .streamlit/secrets.toml
+    -----------------------
+    DB_URL = "postgresql+psycopg2://USER:PASS@HOST:PORT/DBNAME"
+    # DB_TOKEN = "..."  (if your driver needs it; not used for SQLite/Postgres)
 
-@contextmanager
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+Tables
+------
+Project:
+  id, number, customer, aircraft_model, scope, induction (date), delivery (date),
+  category ('confirmed' | 'potential' | 'actual'),
+  hours by department: maintenance, structures, avionics, inspection,
+  interiors, engineering, cabinet, upholstery, finish
 
-SCHEMA_SQL = """
-PRAGMA journal_mode=WAL;
-CREATE TABLE IF NOT EXISTS depts (
-  key TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  headcount INTEGER NOT NULL DEFAULT 0
-);
+Department:
+  id, key, name, headcount (int)
 
-CREATE TABLE IF NOT EXISTS projects (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  number TEXT,
-  customer TEXT,
-  aircraftModel TEXT,
-  scope TEXT,
-  induction TEXT,
-  delivery TEXT,
-  dataset TEXT CHECK(dataset IN ('confirmed','potential','actual')) NOT NULL,
-  hours_json TEXT NOT NULL DEFAULT '{}',
-  include_in_analysis INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
+Public API (all return/accept plain dicts/lists)
+------------------------------------------------
+init_db()
+seed_if_empty(projects=None, potential=None, actual=None, depts=None)
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_unique ON projects(number, dataset);
+list_projects(category: str|None=None) -> list[dict]
+get_project(project_id: int) -> dict|None
+create_project(data: dict, category: str='confirmed') -> dict
+update_project(project_id: int, data: dict) -> dict
+delete_project(project_id: int) -> None
+
+list_departments() -> list[dict]
+upsert_departments(rows: list[dict]) -> list[dict]
+
+bulk_import_projects(file_path_or_buffer, category: str) -> dict  # uses pandas (csv/xlsx)
+
+get_all_datasets() -> dict  # {"projects": [...], "potential":[...], "actual":[...], "depts":[...]}
+
+Notes
+-----
+- Date fields accept 'YYYY-MM-DD' (preferred) or ISO strings; they are stored as DATE.
+- Returned date fields are 'YYYY-MM-DD' strings.
+- Field names in dicts match your Streamlit app:
+    number, customer, aircraftModel, scope, induction, delivery, and dept keys:
+    "Maintenance","Structures","Avionics","Inspection","Interiors",
+    "Engineering","Cabinet","Upholstery","Finish"
 """
 
+from __future__ import annotations
 
-def init_db():
-    with get_conn() as c:
-        c.executescript(SCHEMA_SQL)
+import os
+from datetime import date, datetime
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+# SQLAlchemy
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Float, Date, select, func
+)
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
-def seed_defaults(default_projects: List[dict], default_potential: List[dict], default_actual: List[dict], default_depts: List[dict]):
-    """Seed DB only if tables are empty."""
-    with get_conn() as c:
-        # Seed depts if empty
-        cur = c.execute("SELECT COUNT(1) AS n FROM depts")
-        if cur.fetchone()[0] == 0:
-            for d in default_depts:
-                c.execute("INSERT INTO depts(key,name,headcount) VALUES (?,?,?)", (d["key"], d["name"], int(d.get("headcount", 0))))
-        # Seed projects if empty
-        cur = c.execute("SELECT COUNT(1) AS n FROM projects")
-        if cur.fetchone()[0] == 0:
-            def _insert(rows: List[dict], dataset: str):
-                for p in rows:
-                    hours = {k: float(p.get(k, 0) or 0.0) for k in p.keys() if k not in {"number","customer","aircraftModel","scope","induction","delivery"}}
-                    c.execute(
-                        """
-                        INSERT INTO projects(number, customer, aircraftModel, scope, induction, delivery, dataset, hours_json, include_in_analysis)
-                        VALUES (?,?,?,?,?,?,?,?,?)
-                        """,
-                        (
-                            str(p.get("number") or ""),
-                            str(p.get("customer") or ""),
-                            str(p.get("aircraftModel") or ""),
-                            str(p.get("scope") or ""),
-                            str(p.get("induction") or ""),
-                            str(p.get("delivery") or ""),
-                            dataset,
-                            json.dumps(hours),
-                            1,
-                        )
-                    )
-            _insert(default_projects, "confirmed")
-            _insert(default_potential, "potential")
-            _insert(default_actual, "actual")
+# Optional: read Streamlit secrets if available
+def _read_secrets(key: str, default: Optional[str] = None) -> Optional[str]:
+    try:
+        import streamlit as st  # type: ignore
+        return st.secrets.get(key, default)
+    except Exception:
+        return os.environ.get(key, default)
 
+Base = declarative_base()
 
-def list_depts() -> List[dict]:
-    with get_conn() as c:
-        rows = c.execute("SELECT key,name,headcount FROM depts ORDER BY name").fetchall()
-        return [dict(r) for r in rows]
+# ------------------------- Models -------------------------
+class Project(Base):
+    __tablename__ = "projects"
 
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    number = Column(String(64), nullable=True)
+    customer = Column(String(128), nullable=True)
+    aircraft_model = Column(String(64), nullable=True)
+    scope = Column(String(256), nullable=True)
+    induction = Column(Date, nullable=True)
+    delivery = Column(Date, nullable=True)
+    category = Column(String(16), nullable=False, default="confirmed")  # confirmed|potential|actual
 
-def upsert_depts(depts: List[dict]):
-    with get_conn() as c:
-        for d in depts:
-            c.execute(
-                "INSERT INTO depts(key,name,headcount) VALUES (?,?,?)\n                 ON CONFLICT(key) DO UPDATE SET name=excluded.name, headcount=excluded.headcount",
-                (d["key"], d["name"], int(d.get("headcount", 0)))
-            )
+    # Hours by department
+    maintenance = Column(Float, default=0.0)
+    structures  = Column(Float, default=0.0)
+    avionics    = Column(Float, default=0.0)
+    inspection  = Column(Float, default=0.0)
+    interiors   = Column(Float, default=0.0)
+    engineering = Column(Float, default=0.0)
+    cabinet     = Column(Float, default=0.0)
+    upholstery  = Column(Float, default=0.0)
+    finish      = Column(Float, default=0.0)
 
 
-def _row_to_project(r: sqlite3.Row) -> dict:
-    base = dict(r)
-    base["hours"] = json.loads(base.pop("hours_json") or "{}")
-    base["include_in_analysis"] = bool(base.get("include_in_analysis", 1))
-    return base
+class Department(Base):
+    __tablename__ = "departments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key = Column(String(64), unique=True, nullable=False)   # e.g., "Maintenance"
+    name = Column(String(128), nullable=False)              # display name
+    headcount = Column(Integer, default=0)
 
 
-def get_projects(dataset: Optional[str] = None) -> List[dict]:
-    with get_conn() as c:
-        if dataset:
-            rows = c.execute("SELECT * FROM projects WHERE dataset=? ORDER BY induction, delivery, number", (dataset,)).fetchall()
-        else:
-            rows = c.execute("SELECT * FROM projects ORDER BY dataset, induction, delivery, number").fetchall()
-        return [_row_to_project(r) for r in rows]
+# ------------------------- Engine & Session -------------------------
+def _resolve_db_url() -> str:
+    url = _read_secrets("DB_URL")
+    if url:
+        return url  # e.g., postgresql+psycopg2://... or sqlite:///...
+    # default to local SQLite (works on Streamlit Cloud but is ephemeral)
+    return "sqlite:///capacity.db"
 
+_ENGINE = create_engine(_resolve_db_url(), future=True)  # autocommit=False by default
+_SessionLocal = sessionmaker(bind=_ENGINE, expire_on_commit=False, class_=Session)
 
-def upsert_project(p: dict):
-    """Upsert by (number, dataset) if id not provided."""
-    hours = p.get("hours") or {k: v for k, v in p.items() if k not in {"id","number","customer","aircraftModel","scope","induction","delivery","dataset","include_in_analysis"}}
-    payload = (
-        p.get("number") or "",
-        p.get("customer") or "",
-        p.get("aircraftModel") or "",
-        p.get("scope") or "",
-        p.get("induction") or "",
-        p.get("delivery") or "",
-        p.get("dataset") or "confirmed",
-        json.dumps({k: float(hours.get(k, 0) or 0.0) for k in hours.keys()}),
-        1 if p.get("include_in_analysis", True) else 0,
-    )
-    with get_conn() as c:
-        if p.get("id"):
-            c.execute(
-                """
-                UPDATE projects SET number=?, customer=?, aircraftModel=?, scope=?, induction=?, delivery=?, dataset=?, hours_json=?, include_in_analysis=?, updated_at=CURRENT_TIMESTAMP
-                WHERE id=?
-                """,
-                payload + (int(p["id"]),)
-            )
-        else:
-            # try update by (number, dataset); if no row, insert
-            cur = c.execute("SELECT id FROM projects WHERE number=? AND dataset=?", (p.get("number"), p.get("dataset")))
-            row = cur.fetchone()
-            if row:
-                c.execute(
-                    """
-                    UPDATE projects SET customer=?, aircraftModel=?, scope=?, induction=?, delivery=?, hours_json=?, include_in_analysis=?, updated_at=CURRENT_TIMESTAMP
-                    WHERE id=?
-                    """,
-                    (
-                        p.get("customer") or "",
-                        p.get("aircraftModel") or "",
-                        p.get("scope") or "",
-                        p.get("induction") or "",
-                        p.get("delivery") or "",
-                        payload[7],
-                        payload[8],
-                        int(row["id"]),
-                    ),
-                )
-            else:
-                c.execute(
-                    """
-                    INSERT INTO projects(number, customer, aircraftModel, scope, induction, delivery, dataset, hours_json, include_in_analysis)
-                    VALUES (?,?,?,?,?,?,?,?,?)
-                    """,
-                    payload,
-                )
+def init_db() -> None:
+    Base.metadata.create_all(_ENGINE)
 
-
-def delete_project(project_id: int):
-    with get_conn() as c:
-        c.execute("DELETE FROM projects WHERE id=?", (project_id,))
-
-
-def replace_dataset(dataset: str, rows: List[dict]):
-    with get_conn() as c:
-        c.execute("DELETE FROM projects WHERE dataset=?", (dataset,))
-        for p in rows:
-            upsert_project({**p, "dataset": dataset})
-
-
-# =======================
-# file: app.py  (Streamlit single-app with CRUD + charts)
-# =======================
-import json as _json
-from datetime import date
-from copy import deepcopy
-
-import streamlit as st
-import streamlit.components.v1 as components
-import pandas as pd
-
-import data_store as store
-
-st.set_page_config(layout="wide", page_title="Labor Capacity Dashboard + Admin")
-try:
-    st.image("citadel_logo.png", width=200)
-except Exception:
-    pass
-
-# --------------------- DEFAULT (only used for first-run seed) ---------------------
-DEFAULT_PROJECTS = [
-    {"number":"P7657","customer":"Kaiser","aircraftModel":"B737","scope":"Starlink","induction":"2025-11-15T00:00:00","delivery":"2025-11-25T00:00:00","Maintenance":93.57,"Structures":240.61,"Avionics":294.07,"Inspection":120.3,"Interiors":494.58,"Engineering":80.2,"Cabinet":0,"Upholstery":0,"Finish":13.37},
-    {"number":"P7611","customer":"Alpha Star","aircraftModel":"A340","scope":"Mx Check","induction":"2025-10-20T00:00:00","delivery":"2025-12-04T00:00:00","Maintenance":2432.23,"Structures":1252.97,"Avionics":737.04,"Inspection":1474.08,"Interiors":1474.08,"Engineering":0.0,"Cabinet":0,"Upholstery":0,"Finish":0.0},
-    {"number":"P7645","customer":"Kaiser","aircraftModel":"B737","scope":"Starlink","induction":"2025-11-30T00:00:00","delivery":"2025-12-10T00:00:00","Maintenance":93.57,"Structures":240.61,"Avionics":294.07,"Inspection":120.3,"Interiors":494.58,"Engineering":80.2,"Cabinet":0,"Upholstery":0,"Finish":13.37},
-    {"number":"P7426","customer":"Celestial","aircraftModel":"B757","scope":"Post Maintenance Discrepancies","induction":"2026-01-05T00:00:00","delivery":"2026-01-15T00:00:00","Maintenance":0.0,"Structures":0.0,"Avionics":0.0,"Inspection":0.0,"Interiors":0.0,"Engineering":0.0,"Cabinet":0,"Upholstery":0,"Finish":0.0},
-    {"number":"P7548","customer":"Ty Air","aircraftModel":"B737","scope":"CMS Issues","induction":"2025-10-20T00:00:00","delivery":"2025-10-30T00:00:00","Maintenance":0.0,"Structures":0.0,"Avionics":0.0,"Inspection":0.0,"Interiors":0.0,"Engineering":0.0,"Cabinet":0,"Upholstery":0,"Finish":0.0},
-    {"number":"P7706","customer":"Valkyrie","aircraftModel":"B737-MAX","scope":"Starlink, Mods","induction":"2025-10-31T00:00:00","delivery":"2025-11-25T00:00:00","Maintenance":123.3,"Structures":349.4,"Avionics":493.2,"Inspection":164.4,"Interiors":698.7,"Engineering":143.8,"Cabinet":61.6,"Upholstery":0,"Finish":20.6},
-    {"number":"P7685","customer":"Sands","aircraftModel":"B737-700","scope":"Starlink","induction":"2025-11-17T00:00:00","delivery":"2025-11-24T00:00:00","Maintenance":105.44,"Structures":224.1,"Avionics":303.14,"Inspection":118.62,"Interiors":474.48,"Engineering":79.08,"Cabinet":0,"Upholstery":0,"Finish":13.18},
-    {"number":"P7712","customer":"Ty Air","aircraftModel":"B737","scope":"Monthly and 6 Month Check","induction":"2025-11-04T00:00:00","delivery":"2025-12-21T00:00:00","Maintenance":893.0,"Structures":893.0,"Avionics":476.3,"Inspection":238.1,"Interiors":3453.0,"Engineering":0.0,"Cabinet":0,"Upholstery":0,"Finish":0.0},
-    {"number":"P7639/7711","customer":"Snap","aircraftModel":"B737","scope":"Starlink and MX Package","induction":"2025-12-01T00:00:00","delivery":"2025-12-15T00:00:00","Maintenance":132.1,"Structures":330.3,"Avionics":440.4,"Inspection":220.2,"Interiors":990.9,"Engineering":66.1,"Cabinet":0,"Upholstery":0,"Finish":22.0},
-]
-DEFAULT_POTENTIAL = [
-    {"number":"P7661","customer":"Sands","aircraftModel":"A340-500","scope":"C Check","induction":"2026-01-29T00:00:00","delivery":"2026-02-28T00:00:00","Maintenance":2629.44,"Structures":1709.14,"Avionics":723.1,"Inspection":1248.98,"Interiors":262.94,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-    {"number":"P7669","customer":"Sands","aircraftModel":"A319-133","scope":"C Check","induction":"2025-12-08T00:00:00","delivery":"2026-01-28T00:00:00","Maintenance":2029.67,"Structures":984.08,"Avionics":535.55,"Inspection":675.56,"Interiors":1906.66,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-    {"number":None,"customer":"Sands","aircraftModel":"B767-300","scope":"C Check","induction":"2026-09-15T00:00:00","delivery":"2026-12-04T00:00:00","Maintenance":0.0,"Structures":0.0,"Avionics":0.0,"Inspection":0.0,"Interiors":0.0,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-    {"number":"P7686","customer":"Polaris","aircraftModel":"B777","scope":"1A & 3A Mx Checks","induction":"2025-12-01T00:00:00","delivery":"2025-12-09T00:00:00","Maintenance":643.15,"Structures":287.36,"Avionics":150.52,"Inspection":177.89,"Interiors":109.47,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-    {"number":"P7430","customer":"Turkmen","aircraftModel":"B777","scope":"Maint/Recon/Refub","induction":"2025-11-10T00:00:00","delivery":"2026-07-13T00:00:00","Maintenance":12720.0,"Structures":12720.0,"Avionics":3180.0,"Inspection":3180.0,"Interiors":19080.0,"Engineering":3180,"Cabinet":3180,"Upholstery":3180,"Finish":3180},
-    {"number":"P7649","customer":"NEP","aircraftModel":"B767-300","scope":"Refurb","induction":"2026-02-02T00:00:00","delivery":"2026-07-13T00:00:00","Maintenance":2000.0,"Structures":2400.0,"Avionics":2800.0,"Inspection":800.0,"Interiors":4400.0,"Engineering":1800,"Cabinet":1600,"Upholstery":1200,"Finish":3000},
-    {"number":"P7689","customer":"Sands","aircraftModel":"B737-700","scope":"C1,C3,C6C7 Mx","induction":"2025-09-10T00:00:00","delivery":"2026-11-07T00:00:00","Maintenance":8097.77,"Structures":1124.69,"Avionics":899.75,"Inspection":787.28,"Interiors":337.14,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-    {"number":"P7690","customer":"Sands","aircraftModel":None,"scope":"C1,C2,C7 Mx","induction":"2025-05-25T00:00:00","delivery":"2025-07-22T00:00:00","Maintenance":3227.14,"Structures":2189.85,"Avionics":922.04,"Inspection":1152.55,"Interiors":4033.92,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-    {"number":"P7691","customer":"Sands","aircraftModel":"B737-700","scope":"C1,C2,C3,C7 Mx","induction":"2026-10-13T00:00:00","delivery":"2026-12-22T00:00:00","Maintenance":4038.3,"Structures":5115.18,"Avionics":1076.88,"Inspection":1346.1,"Interiors":1884.54,"Engineering":0,"Cabinet":0,"Upholstery":0,"Finish":0},
-]
-DEFAULT_ACTUAL = []
-DEFAULT_DEPTS = [
-    {"name":"Maintenance","headcount":36,"key":"Maintenance"},
-    {"name":"Structures","headcount":22,"key":"Structures"},
-    {"name":"Avionics","headcount":15,"key":"Avionics"},
-    {"name":"Inspection","headcount":10,"key":"Inspection"},
-    {"name":"Interiors","headcount":11,"key":"Interiors"},
-    {"name":"Engineering","headcount":7,"key":"Engineering"},
-    {"name":"Cabinet","headcount":3,"key":"Cabinet"},
-    {"name":"Upholstery","headcount":7,"key":"Upholstery"},
-    {"name":"Finish","headcount":6,"key":"Finish"},
+# ------------------------- Helpers -------------------------
+DEPT_KEYS = [
+    "Maintenance","Structures","Avionics","Inspection",
+    "Interiors","Engineering","Cabinet","Upholstery","Finish"
 ]
 
-# --------------------- DB INIT ---------------------
-store.init_db()
-store.seed_defaults(DEFAULT_PROJECTS, DEFAULT_POTENTIAL, DEFAULT_ACTUAL, DEFAULT_DEPTS)
-
-# --------------------- HELPERS ---------------------
-
-def dept_keys():
-    return [d["key"] for d in store.list_depts()]
-
-
-def project_to_hours_dict(p: dict) -> dict:
-    h = {k: float(v) for k, v in (p.get("hours") or {}).items()}
-    # Normalize to all known dept keys
-    for k in dept_keys():
-        if k not in h:
-            h[k] = 0.0
-    return h
-
-# --------------------- SIDEBAR: CRUD / ADMIN ---------------------
-st.sidebar.header("Data Admin")
-admin_tabs = st.sidebar.tabs(["Add / Edit", "Bulk Upload", "Departments"])
-
-with admin_tabs[0]:
-    st.caption("Create or update a single project (saved to SQLite immediately)")
-    ds_map = {"Confirmed":"confirmed","Potential":"potential","Actual":"actual"}
-    ds_choice = st.selectbox("Dataset", list(ds_map.keys()), key="admin_ds")
-
-    dataset = ds_map[ds_choice]
-    existing = store.get_projects(dataset)
-    options = ["➕ New Project"] + [f"{p['number'] or '—'} — {p['customer']}" for p in existing]
-    sel = st.selectbox("Project", options, key="admin_sel")
-
-    if sel == "➕ New Project":
-        proj = {"number":"PXXXX","customer":"","aircraftModel":"","scope":"",
-                "induction": date(2025,11,1).isoformat(), "delivery": date(2025,11,8).isoformat(),
-                "dataset": dataset, "hours": {k:0.0 for k in dept_keys()}, "include_in_analysis": True}
-    else:
-        idx = options.index(sel) - 1
-        proj = existing[idx]
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        proj["number"] = st.text_input("Project Number", str(proj.get("number") or ""))
-        proj["customer"] = st.text_input("Customer", str(proj.get("customer") or ""))
-        proj["aircraftModel"] = st.text_input("Aircraft Model", str(proj.get("aircraftModel") or ""))
-    with c2:
-        proj["scope"] = st.text_input("Scope", str(proj.get("scope") or ""))
-        proj["induction"] = st.date_input("Induction", date.fromisoformat(str(proj.get("induction", "2025-11-01"))[:10])).isoformat()
-        proj["delivery"] = st.date_input("Delivery", date.fromisoformat(str(proj.get("delivery", "2025-11-08"))[:10])).isoformat()
-    with c3:
-        if dataset == "potential":
-            proj["include_in_analysis"] = st.checkbox("Include in visualizations by default", bool(proj.get("include_in_analysis", True)))
-        else:
-            st.caption("\n")
-            st.caption("\n")
-            st.caption("\n")
-
-    st.markdown("**Hours by department**")
-    hcols = st.columns(3)
-    hours = project_to_hours_dict(proj)
-    keys = dept_keys()
-    for i, k in enumerate(keys):
-        with hcols[i % 3]:
-            hours[k] = st.number_input(f"{k}", min_value=0.0, value=float(hours.get(k, 0.0)), step=1.0)
-    proj["hours"] = hours
-    proj["dataset"] = dataset
-
-    cA, cB, cC = st.columns([1,1,1])
-    if cA.button("Save / Update", use_container_width=True):
-        store.upsert_project(proj)
-        st.success("Saved to database.")
-    if sel != "➕ New Project":
-        if cB.button("Delete", type="primary", use_container_width=True):
-            store.delete_project(existing[options.index(sel)-1]["id"])
-            st.warning("Deleted. Reload sidebar to refresh list.")
-
-with admin_tabs[1]:
-    st.caption("Upload CSV or Excel with columns: dataset, number, customer, aircraftModel, scope, induction, delivery, and one column per department name (e.g., Maintenance, Structures, ...)")
-    mode = st.radio("Ingest mode", ["Append", "Replace per dataset"], horizontal=True)
-    up = st.file_uploader("Upload file", type=["csv", "xlsx", "xls"])
-    if up:
+def _to_date(v: Any) -> Optional[date]:
+    if v in (None, "", "NaT", "nan"):
+        return None
+    if isinstance(v, date):
+        return v
+    if isinstance(v, datetime):
+        return v.date()
+    s = str(v).strip()
+    # Accept 'YYYY-MM-DD' or full ISO
+    try:
+        if "T" in s:
+            return datetime.fromisoformat(s.replace("Z","")).date()
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except Exception:
+        # Try broader ISO parse
         try:
-            if up.name.lower().endswith(('.xlsx', '.xls')):
-                df = pd.read_excel(up)
+            return datetime.fromisoformat(s).date()
+        except Exception:
+            return None
+
+def _float_or_zero(v: Any) -> float:
+    try:
+        if v is None or v == "":
+            return 0.0
+        return float(v)
+    except Exception:
+        return 0.0
+
+def _project_to_dict(p: Project) -> Dict[str, Any]:
+    # Keep the app’s original field names/casing
+    return {
+        "id": p.id,
+        "number": p.number,
+        "customer": p.customer,
+        "aircraftModel": p.aircraft_model,
+        "scope": p.scope,
+        "induction": p.induction.isoformat() if p.induction else None,
+        "delivery":  p.delivery.isoformat()  if p.delivery  else None,
+        # Hours by dept
+        "Maintenance": p.maintenance or 0.0,
+        "Structures":  p.structures  or 0.0,
+        "Avionics":    p.avionics    or 0.0,
+        "Inspection":  p.inspection  or 0.0,
+        "Interiors":   p.interiors   or 0.0,
+        "Engineering": p.engineering or 0.0,
+        "Cabinet":     p.cabinet     or 0.0,
+        "Upholstery":  p.upholstery  or 0.0,
+        "Finish":      p.finish      or 0.0,
+        "category":    p.category,
+    }
+
+def _dict_to_project_fields(data: Dict[str, Any]) -> Dict[str, Any]:
+    # Map incoming dict to model columns (normalize keys)
+    return {
+        "number": data.get("number"),
+        "customer": data.get("customer"),
+        "aircraft_model": data.get("aircraftModel") or data.get("aircraft_model"),
+        "scope": data.get("scope"),
+        "induction": _to_date(data.get("induction")),
+        "delivery":  _to_date(data.get("delivery")),
+        "maintenance": _float_or_zero(data.get("Maintenance")),
+        "structures":  _float_or_zero(data.get("Structures")),
+        "avionics":    _float_or_zero(data.get("Avionics")),
+        "inspection":  _float_or_zero(data.get("Inspection")),
+        "interiors":   _float_or_zero(data.get("Interiors")),
+        "engineering": _float_or_zero(data.get("Engineering")),
+        "cabinet":     _float_or_zero(data.get("Cabinet")),
+        "upholstery":  _float_or_zero(data.get("Upholstery")),
+        "finish":      _float_or_zero(data.get("Finish")),
+    }
+
+# ------------------------- Project CRUD -------------------------
+def list_projects(category: Optional[str] = None) -> List[Dict[str, Any]]:
+    init_db()
+    with _SessionLocal() as db:
+        stmt = select(Project)
+        if category:
+            stmt = stmt.where(Project.category == category)
+        stmt = stmt.order_by(Project.induction.nulls_last())
+        rows = db.execute(stmt).scalars().all()
+        return [_project_to_dict(p) for p in rows]
+
+def get_project(project_id: int) -> Optional[Dict[str, Any]]:
+    init_db()
+    with _SessionLocal() as db:
+        p = db.get(Project, project_id)
+        return _project_to_dict(p) if p else None
+
+def create_project(data: Dict[str, Any], category: str = "confirmed") -> Dict[str, Any]:
+    init_db()
+    fields = _dict_to_project_fields(data)
+    cat = (data.get("category") or category or "confirmed").lower()
+    if cat not in ("confirmed","potential","actual"):
+        cat = "confirmed"
+    with _SessionLocal() as db:
+        p = Project(category=cat, **fields)
+        db.add(p)
+        db.commit()
+        db.refresh(p)
+        return _project_to_dict(p)
+
+def update_project(project_id: int, data: Dict[str, Any]) -> Dict[str, Any]:
+    init_db()
+    with _SessionLocal() as db:
+        p: Project | None = db.get(Project, project_id)
+        if not p:
+            raise ValueError(f"Project id {project_id} not found")
+        fields = _dict_to_project_fields(data)
+        for k, v in fields.items():
+            setattr(p, k, v)
+        if "category" in data and data["category"]:
+            cat = str(data["category"]).lower()
+            if cat in ("confirmed","potential","actual"):
+                p.category = cat
+        db.commit()
+        db.refresh(p)
+        return _project_to_dict(p)
+
+def delete_project(project_id: int) -> None:
+    init_db()
+    with _SessionLocal() as db:
+        p = db.get(Project, project_id)
+        if p:
+            db.delete(p)
+            db.commit()
+
+# ------------------------- Departments -------------------------
+def list_departments() -> List[Dict[str, Any]]:
+    init_db()
+    with _SessionLocal() as db:
+        rows = db.execute(select(Department).order_by(Department.id)).scalars().all()
+        return [{"id": d.id, "key": d.key, "name": d.name, "headcount": d.headcount} for d in rows]
+
+def upsert_departments(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Upsert by 'key'. If a row has an 'id' that doesn't match, 'key' wins.
+    """
+    init_db()
+    rows = rows or []
+    with _SessionLocal() as db:
+        existing_by_key = {d.key: d for d in db.execute(select(Department)).scalars().all()}
+        result = []
+        for r in rows:
+            key = (r.get("key") or r.get("name") or "").strip() or "Unknown"
+            name = r.get("name") or key
+            headcount = int(r.get("headcount") or 0)
+            d = existing_by_key.get(key)
+            if d:
+                d.name = name
+                d.headcount = headcount
             else:
-                df = pd.read_csv(up)
-        except Exception as e:
-            st.error(f"Could not read file: {e}")
-            df = None
-        if df is not None:
-            # Normalize column names
-            df.columns = [c.strip() for c in df.columns]
-            st.dataframe(df.head(20))
-            if st.button("Import", type="primary"):
-                try:
-                    grouped = df.groupby(df['dataset'].str.lower())
-                    for ds, sub in grouped:
-                        rows = []
-                        for _, r in sub.iterrows():
-                            hours = {k: float(r.get(k, 0) or 0.0) for k in dept_keys()}
-                            rows.append({
-                                "number": str(r.get("number", "")),
-                                "customer": str(r.get("customer", "")),
-                                "aircraftModel": str(r.get("aircraftModel", "")),
-                                "scope": str(r.get("scope", "")),
-                                "induction": str(r.get("induction", "")),
-                                "delivery": str(r.get("delivery", "")),
-                                "hours": hours,
-                                "include_in_analysis": bool(r.get("include_in_analysis", True)),
-                            })
-                        if mode.startswith("Replace"):
-                            store.replace_dataset(ds, rows)
-                        else:
-                            for p in rows:
-                                store.upsert_project({**p, "dataset": ds})
-                    st.success("Import complete.")
-                except Exception as e:
-                    st.error(f"Import failed: {e}")
+                d = Department(key=key, name=name, headcount=headcount)
+                db.add(d)
+            result.append({"key": key, "name": name, "headcount": headcount})
+        db.commit()
+    return list_departments()
 
-with admin_tabs[2]:
-    st.caption("Edit department names and headcounts, then save.")
-    df_depts = pd.DataFrame(store.list_depts())
-    df_depts = st.data_editor(df_depts, key="de_depts", height=260)
-    if st.button("Save Departments", type="primary"):
+# ------------------------- Bulk Import -------------------------
+def bulk_import_projects(file_path_or_buffer: Any, category: str) -> Dict[str, Any]:
+    """
+    Import projects from CSV/XLSX with columns:
+    number, customer, aircraftModel, scope, induction, delivery, and the DEPT_KEYS.
+    Extra columns are ignored. Missing dept columns default to 0.
+
+    Returns: {"imported": N, "errors": [row_index,...]}
+    """
+    import pandas as pd
+
+    cat = (category or "confirmed").lower()
+    if cat not in ("confirmed","potential","actual"):
+        cat = "confirmed"
+
+    df = None
+    try:
+        df = pd.read_excel(file_path_or_buffer)
+    except Exception:
         try:
-            df_depts["headcount"] = pd.to_numeric(df_depts["headcount"], errors="coerce").fillna(0).astype(int)
-            store.upsert_depts(df_depts.to_dict(orient="records"))
-            st.success("Departments saved.")
+            df = pd.read_csv(file_path_or_buffer)
         except Exception as e:
-            st.error(f"Failed to save departments: {e}")
+            raise ValueError(f"Could not read file as Excel or CSV: {e}")
 
-st.sidebar.markdown("---")
-
-# --------------------- LOAD DATA FOR DASHBOARD ---------------------
-# Pull all current rows to feed into the existing HTML/JS visual layer
-all_confirmed = store.get_projects("confirmed")
-all_potential = store.get_projects("potential")
-all_actual    = store.get_projects("actual")
-all_depts     = store.list_depts()
-
-# Potential checklist (for visualizations only)
-pot_labels = [f"{p['number'] or '—'} — {p['customer']}" for p in all_potential]
-pre_selected = [i for i,p in enumerate(all_potential) if p.get("include_in_analysis", True)]
-
-st.sidebar.subheader("Visualization Filters")
-use_checklist = st.sidebar.checkbox("Use potential project checklist", value=True)
-selected_idx = st.sidebar.multiselect("Potential to include", options=list(range(len(pot_labels))),
-                                      default=pre_selected, format_func=lambda i: pot_labels[i],
-                                      disabled=not use_checklist)
-
-# Filter potential for injection
-if use_checklist:
-    filtered_potential = [all_potential[i] for i in selected_idx]
-else:
-    filtered_potential = [p for p in all_potential if p.get("include_in_analysis", True)]
-
-# Shape data to match the HTML template expectations
-
-def shape_for_html(rows: List[dict]) -> List[dict]:
-    shaped = []
-    for p in rows:
-        base = {
-            "number": p.get("number"),
-            "customer": p.get("customer"),
-            "aircraftModel": p.get("aircraftModel"),
-            "scope": p.get("scope"),
-            "induction": p.get("induction"),
-            "delivery": p.get("delivery"),
+    # Normalize columns -> exact expected names
+    colmap = {c.lower().strip(): c for c in df.columns}
+    def get_col(name: str) -> Optional[str]:
+        # accept camel or snake or common variants
+        candidates = {
+            "number": ["number","project","project number","proj","p#","p-number"],
+            "customer": ["customer","client","owner"],
+            "aircraftModel": ["aircraftmodel","aircraft","model","aircraft_model"],
+            "scope": ["scope","work scope","description"],
+            "induction": ["induction","start","start_date","induct","induction_date"],
+            "delivery": ["delivery","end","finish","delivery_date","complete","completion"],
         }
-        for k, v in (p.get("hours") or {}).items():
-            base[k] = float(v or 0.0)
-        shaped.append(base)
-    return shaped
+        want = name if name in candidates else None
+        names = candidates.get(name, [name])
+        for n in names:
+            key = n.lower().strip()
+            if key in colmap:
+                return colmap[key]
+        return None
 
-HTML_PROJECTS  = shape_for_html(all_confirmed)
-HTML_POTENTIAL = shape_for_html(filtered_potential)
-HTML_ACTUAL    = shape_for_html(all_actual)
-HTML_DEPTS     = all_depts
+    base_cols = {
+        "number": get_col("number"),
+        "customer": get_col("customer"),
+        "aircraftModel": get_col("aircraftModel"),
+        "scope": get_col("scope"),
+        "induction": get_col("induction"),
+        "delivery": get_col("delivery"),
+    }
 
-# --------------------- VISUAL LAYER (reuses your proven HTML/JS) ---------------------
-# NOTE: potential is passed already filtered. Default Show Potential in the top graph is OFF in the HTML.
+    imported, errors = 0, []
+    for i, row in df.iterrows():
+        try:
+            rec = {
+                "number": row.get(base_cols["number"]) if base_cols["number"] else None,
+                "customer": row.get(base_cols["customer"]) if base_cols["customer"] else None,
+                "aircraftModel": row.get(base_cols["aircraftModel"]) if base_cols["aircraftModel"] else None,
+                "scope": row.get(base_cols["scope"]) if base_cols["scope"] else None,
+                "induction": row.get(base_cols["induction"]) if base_cols["induction"] else None,
+                "delivery": row.get(base_cols["delivery"]) if base_cols["delivery"] else None,
+            }
+            # departments
+            for k in DEPT_KEYS:
+                rec[k] = row.get(k, 0.0)
+            create_project(rec, category=cat)
+            imported += 1
+        except Exception:
+            errors.append(int(i))
 
-# the massive html_template was in your previous code; we keep it as-is but ensure default toggles
-# For brevity, we include only the small patch that turns off defaults in the top graph and snapshot/planner
+    return {"imported": imported, "errors": errors}
 
-from pathlib import Path
+# ------------------------- Seeding -------------------------
+_DEFAULT_DEPTS = [
+    {"key":"Maintenance","name":"Maintenance","headcount":36},
+    {"key":"Structures","name":"Structures","headcount":22},
+    {"key":"Avionics","name":"Avionics","headcount":15},
+    {"key":"Inspection","name":"Inspection","headcount":10},
+    {"key":"Interiors","name":"Interiors","headcount":11},
+    {"key":"Engineering","name":"Engineering","headcount":7},
+    {"key":"Cabinet","name":"Cabinet","headcount":3},
+    {"key":"Upholstery","name":"Upholstery","headcount":7},
+    {"key":"Finish","name":"Finish","headcount":6},
+]
 
-# Load your existing template from file if you placed it externally; otherwise, embed a minimized version
-# Here we inline a tiny loader that expects `html_template` variable available from your prior app.
-try:
-    from html_template_module import html_template  # optional: if you split HTML to a separate file
-except Exception:
-    # Fallback: read from a sibling file named html_template.html if you created one
-    if Path("html_template.html").exists():
-        html_template = Path("html_template.html").read_text(encoding="utf-8")
-    else:
-        # As a last resort, import the template string from a previous block in memory
-        # If you still keep your long html_template string in this same file, comment this block out
-        html_template = """
-        <html><body>
-        <p style='color:#b91c1c'>Missing html_template. Please paste your existing long HTML/JS template string into this variable.</p>
-        </body></html>
-        """
+def seed_if_empty(
+    projects: Optional[List[Dict[str, Any]]] = None,
+    potential: Optional[List[Dict[str, Any]]] = None,
+    actual: Optional[List[Dict[str, Any]]] = None,
+    depts: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """
+    Seed DB if no rows exist. Pass in your DEFAULT_* lists from the app.
+    """
+    init_db()
+    with _SessionLocal() as db:
+        has_projects = db.execute(select(func.count(Project.id))).scalar_one() > 0
+        has_depts = db.execute(select(func.count(Department.id))).scalar_one() > 0
 
-# --- Patch default toggles inside the HTML ---
-# 1) Top graph: default Show Potential OFF (we'll set checkbox unchecked via a simple replace on the HTML)
-html_template = html_template.replace(
-    '<input type="checkbox" id="showPotential" checked>',
-    '<input type="checkbox" id="showPotential">'
-)
-# 2) Snapshot defaults: potential OFF by default
-html_template = html_template.replace(
-    '<input type="checkbox" id="snapPotential" checked>',
-    '<input type="checkbox" id="snapPotential">'
-)
-# 3) Hangar planner defaults: potential OFF by default
-html_template = html_template.replace(
-    '<input type="checkbox" id="planIncludePotential" checked>',
-    '<input type="checkbox" id="planIncludePotential">'
-)
+    if not has_depts:
+        upsert_departments(depts or _DEFAULT_DEPTS)
 
-# Inject live data
-html_code = (
-    html_template
-      .replace("__PROJECTS__", _json.dumps(HTML_PROJECTS))
-      .replace("__POTENTIAL__", _json.dumps(HTML_POTENTIAL))
-      .replace("__ACTUAL__", _json.dumps(HTML_ACTUAL))
-      .replace("__DEPTS__", _json.dumps(HTML_DEPTS))
-)
+    if not has_projects:
+        for arr, cat in ((projects, "confirmed"), (potential, "potential"), (actual, "actual")):
+            if not arr:
+                continue
+            for rec in arr:
+                create_project(rec, category=cat)
 
-components.html(html_code, height=2600, scrolling=False)
+# ------------------------- Convenience -------------------------
+def get_all_datasets() -> Dict[str, Any]:
+    """
+    Return everything the Streamlit app expects, grouped like session state:
+    {
+      "projects": [...], "potential": [...], "actual": [...], "depts":[...]
+    }
+    """
+    return {
+        "projects":  list_projects("confirmed"),
+        "potential": list_projects("potential"),
+        "actual":    list_projects("actual"),
+        "depts":     list_departments(),
+    }
 
-# Footer note
-st.caption("Data is persisted in capacity.db (SQLite). Use the sidebar → Data Admin to add, edit, delete, or bulk-upload projects and departments. Potential project checklist only affects visualizations; it does not delete data.")
+# ------------------------- Run-once init -------------------------
+# Safe to call multiple times; create_all is idempotent.
+init_db()
+
+if __name__ == "__main__":
+    # Simple smoke test: prints counts
+    init_db()
+    print("Projects (confirmed):", len(list_projects("confirmed")))
+    print("Projects (potential):", len(list_projects("potential")))
+    print("Projects (actual):", len(list_projects("actual")))
+    print("Departments:", len(list_departments()))
